@@ -36,49 +36,61 @@ class YahooProvider:
         self._last_call = time.monotonic()
 
     # ---- identifier resolution -------------------------------------------------
-    def resolve(self, isin: str, hint_name: str | None = None, hint_currency: str | None = None) -> SecurityIds | None:
+    @staticmethod
+    def rank_candidates(cands: list[dict], hint_currency: str | None) -> list[dict]:
+        """Order listings: trading-currency match first (BUX trades many US names in EUR),
+        then preferred exchanges, then equities/ETFs before other quote types."""
+        hc = (hint_currency or "").upper()
+
+        def key(c):
+            ccy = (c.get("currency") or "").upper()
+            ex = c.get("exchange") or ""
+            ccy_rank = 0 if (hc and ccy == hc) else (1 if not ccy else 2)
+            ex_rank = _EXCHANGE_PREFERENCE.index(ex) if ex in _EXCHANGE_PREFERENCE else 99
+            type_rank = 0 if c.get("quoteType") in ("EQUITY", "ETF", None) else 1
+            return (ccy_rank, ex_rank, type_rank)
+        return sorted(cands, key=key)
+
+    def _search(self, query: str) -> list[dict]:
         import yfinance as yf
         self._throttle()
         try:
-            candidates = []
-            try:
-                res = yf.Search(isin, max_results=10).quotes or []
-                candidates = [q for q in res if q.get("symbol")]
-            except Exception as e:  # search endpoint is the flakiest part of Yahoo
-                log.info("yahoo search by ISIN failed for %s: %s", isin, e)
-            if not candidates:
-                t = yf.Ticker(isin)  # Yahoo often accepts an ISIN directly as a symbol
-                info = t.fast_info
-                sym = getattr(info, "symbol", None) or (t.info or {}).get("symbol")
-                if sym:
-                    candidates = [{"symbol": sym, "exchange": (t.info or {}).get("exchange"), "shortname": (t.info or {}).get("shortName")}]
-            if not candidates:
+            return [q for q in (yf.Search(query, max_results=10).quotes or []) if q.get("symbol")]
+        except Exception as e:
+            log.info("yahoo search failed for %r: %s", query, e)
+            return []
+
+    def resolve(self, isin: str, hint_name: str | None = None, hint_currency: str | None = None) -> SecurityIds | None:
+        import yfinance as yf
+        try:
+            seen: dict[str, dict] = {}
+            for q in self._search(isin):
+                seen.setdefault(q["symbol"], q)
+            if hint_name and (hint_currency and not any((q.get("currency") or "").upper() == hint_currency.upper() for q in seen.values())):
+                for q in self._search(hint_name):
+                    seen.setdefault(q["symbol"], q)
+            if not seen:
+                self._throttle()
+                t = yf.Ticker(isin)  # Yahoo often accepts an ISIN directly
+                info = t.info or {}
+                if info.get("symbol"):
+                    seen[info["symbol"]] = {"symbol": info["symbol"], "exchange": info.get("exchange"),
+                                            "shortname": info.get("shortName"), "currency": info.get("currency")}
+            if not seen:
                 self.health.fail(f"no symbol for {isin}")
                 return None
-            if hint_currency:
-                # keep candidates that quote in the broker's trading currency when we can tell
-                filtered = []
-                for c in candidates:
-                    try:
-                        ccy = yf.Ticker(c["symbol"]).fast_info.currency
-                    except Exception:
-                        ccy = None
-                    if ccy is None or ccy.upper() == hint_currency.upper():
-                        filtered.append(c)
+            # fill in quote currency where the search result lacks it (a few cheap calls)
+            for q in list(seen.values())[:6]:
+                if not q.get("currency"):
                     self._throttle()
-                candidates = filtered or candidates
-            def rank(c):
-                ex = c.get("exchange") or ""
-                return _EXCHANGE_PREFERENCE.index(ex) if ex in _EXCHANGE_PREFERENCE else 99
-            best = sorted(candidates, key=rank)[0]
-            sym = best["symbol"]
-            ccy = hint_currency
-            try:
-                ccy = yf.Ticker(sym).fast_info.currency or ccy
-            except Exception:
-                pass
+                    try:
+                        q["currency"] = yf.Ticker(q["symbol"]).fast_info.currency
+                    except Exception:
+                        pass
+            best = self.rank_candidates(list(seen.values()), hint_currency)[0]
+            ccy = (best.get("currency") or hint_currency or "").upper() or None
             self.health.ok()
-            return SecurityIds(isin=isin, ticker=sym, currency=(ccy or "").upper() or None,
+            return SecurityIds(isin=isin, ticker=best["symbol"], currency=ccy,
                                name=best.get("shortname") or best.get("longname") or hint_name,
                                exchange=best.get("exchange"))
         except Exception as e:
