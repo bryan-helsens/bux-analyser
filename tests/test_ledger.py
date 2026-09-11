@@ -20,11 +20,11 @@ def test_deposit_buy_sell_realized_and_cash():
     l = build_ledger(txns)
     p = l.positions["NL0010273215"]
     assert p.quantity == D("1")
-    assert p.avg_cost_local == D("300.5")            # (600 + 1 fee) / 2
-    assert p.realized_pl_base == D("48.5")           # 349 net proceeds − 300.5
-    assert l.realized_pl_base == D("48.5")
+    assert p.avg_cost_local == D("300")              # fees are not in the cost basis (BUX convention)
+    assert p.realized_pl_base == D("50")             # 350 gross − 300 avg cost; fees tracked separately
+    assert l.realized_pl_base == D("50")
     assert l.cash_base == D("1000") - D("601") + D("349")
-    assert l.fees_base == D("2")
+    assert l.fees_base == D("2") and p.fees_base == D("2")
     assert l.net_invested_base == D("1000")
 
 
@@ -63,8 +63,8 @@ def test_dividend_with_withholding_tax_and_fx():
     ]
     l = build_ledger(txns)
     p = l.positions["US0378331005"]
-    assert p.cost_base == D("1001") * D("0.9")
-    assert p.avg_cost_local == D("100.1")
+    assert p.cost_base == D("1000") * D("0.9")
+    assert p.avg_cost_local == D("100") and p.fees_base == D("0.9")
     assert p.dividends_gross_base == D("5") * D("0.92")
     assert p.dividend_tax_base == D("0.75") * D("0.92")
     assert p.dividends_base == D("4.25") * D("0.92")
@@ -73,20 +73,40 @@ def test_dividend_with_withholding_tax_and_fx():
     assert l.cash_base == -D("1001") * D("0.9") + D("4.25") * D("0.92")
 
 
+def test_dividend_reversal_and_transfers():
+    txns = [
+        tx(1, T.BUY, (2024, 1, 1), isin="X", quantity=D("10"), price=D("10")),
+        tx(2, T.DIVIDEND, (2024, 2, 1), isin="X", amount=D("5"), tax=D("1")),
+        tx(3, T.DIVIDEND, (2024, 2, 2), isin="X", amount=D("-5"), tax=D("-1"), note="reversal"),
+        tx(4, T.TRANSFER_OUT, (2024, 3, 1), isin="X", quantity=D("4"), price=D("12")),
+        tx(5, T.TRANSFER_IN, (2024, 3, 2), isin="Y", quantity=D("2"), price=D("50")),
+    ]
+    l = build_ledger(txns)
+    x, y = l.positions["X"], l.positions["Y"]
+    assert x.dividends_base == 0 and x.dividend_tax_base == 0 and l.dividends_net_base == 0
+    assert x.quantity == D("6") and x.cost_base == D("60") and x.realized_pl_base == 0
+    assert y.quantity == D("2") and y.cost_base == D("100")
+    assert l.cash_base == D("-100")  # transfers move no cash; dividend and reversal net to zero
+
+
 def test_standalone_fee_withdrawal_interest_other():
     txns = [
         tx(1, T.DEPOSIT, (2024, 1, 1), amount=D("500")),
-        tx(2, T.FEE, (2024, 1, 5), amount=D("2.5")),
+        tx(2, T.FEE, (2024, 1, 5), amount=D("-2.5")),
         tx(3, T.WITHDRAWAL, (2024, 1, 6), amount=D("-100")),
         tx(4, T.INTEREST, (2024, 1, 7), amount=D("1.2")),
-        tx(5, T.OTHER, (2024, 1, 8), amount=D("-3"), note="promo"),
+        tx(5, T.OTHER, (2024, 1, 8), amount=D("-3"), note="mystery"),
+        tx(6, T.TAX, (2024, 1, 9), isin="X", amount=D("-0.35")),
+        tx(7, T.TAX, (2024, 1, 10), isin="X", amount=D("0.05"), note="refund"),
+        tx(8, T.INCOME, (2024, 1, 11), amount=D("0.4"), note="lending"),
     ]
     l = build_ledger(txns)
     assert l.deposits_base == D("500") and l.withdrawals_base == D("100")
     assert l.fees_base == D("2.5") and l.interest_base == D("1.2") and l.other_cash_base == D("-3")
-    assert l.cash_base == D("500") - D("2.5") - D("100") + D("1.2") - D("3")
+    assert l.taxes_base == D("0.30") and l.positions["X"].taxes_base == D("0.30") and l.income_base == D("0.4")
+    assert l.cash_base == D("500") - D("2.5") - D("100") + D("1.2") - D("3") - D("0.30") + D("0.4")
     assert l.net_invested_base == D("400")
-    assert any("OTHER" in w for w in l.warnings)
+    assert any("unclassified" in w for w in l.warnings)
 
 
 def test_oversell_is_clamped_and_warned():

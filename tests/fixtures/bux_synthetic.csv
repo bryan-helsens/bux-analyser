@@ -1,0 +1,22 @@
+Transaction Time (CET),Transaction Category,Transaction Type,Transfer Type,Transaction Amount,Transaction Currency,Cash Balance Amount,Asset Id,Asset Name,Asset Quantity,Asset Price,Asset Currency,Currency Pair,Exchange Rate,Profit And Loss Amount,Profit And Loss Currency,Dividend Currency,Dividend Gross Amount,Dividend Net Amount,Dividend Tax Amount,Transaction Description
+2024-01-02 09:00:00.000000,deposits,Sepa Deposit,CASH_CREDIT,1000.0,EUR,1000.0,,,,,,,,,,,,,,
+2024-01-02 09:00:01.000000,others,Promotional,CASH_CREDIT,5.0,EUR,1005.0,,,,,,,,,,,,,,
+2024-01-03 10:00:00.100000,trades,Buy Trade,ASSET_TRADE_BUY,220.0,USD,,US0000000001,Acme Inc,2.0,110.0,USD,,,,,,,,,Order Partial Id: aaaaaaaa-0000-0000-0000-000000000001 - 1
+2024-01-03 10:00:00.100000,trades,Buy Trade,CASH_DEBIT,-200.0,EUR,804.01,US0000000001,Acme Inc,2.0,110.0,USD,EURUSD,1.1,,,,,,,Order Partial Id: aaaaaaaa-0000-0000-0000-000000000001 - 1
+2024-01-03 10:00:00.099000,fees,Trading Fee,CASH_DEBIT,-0.99,EUR,1004.01,US0000000001,Acme Inc,,,,,,,,,,,,Order Id: aaaaaaaa-0000-0000-0000-000000000001
+2024-01-03 10:00:00.101000,tax,Tob,CASH_DEBIT,-0.7,EUR,803.31,US0000000001,Acme Inc,,,,,,,,,,,,
+2024-01-04 10:00:00.000000,trades,Buy  Trade,CASH_DEBIT,-150.0,EUR,653.31,NL0000000002,Dutch NV,10.0,15.0,EUR,,,,,,,,,Order Partial Id: bbbbbbbb-0000-0000-0000-000000000002 - 1
+2024-01-04 10:00:00.001000,trades,Buy Trade,ASSET_TRADE_BUY,150.0,EUR,,NL0000000002,Dutch NV,10.0,15.0,EUR,,,,,,,,,Order Partial Id: bbbbbbbb-0000-0000-0000-000000000002 - 1
+2024-02-01 12:00:00.000000,dividends,Cash Dividend,CASH_CREDIT,1.7,EUR,655.01,US0000000001,Acme Inc,,,USD,EURUSD,1.0,,,USD,2.0,1.7,0.3,
+2024-02-02 12:00:00.000000,dividends,Cash Dividend Reversal,CASH_DEBIT,-1.7,EUR,653.31,US0000000001,Acme Inc,,,USD,EURUSD,1.0,,,USD,2.0,1.7,0.3,
+2024-02-03 12:00:00.000000,dividends,Manufactured Cash Dividend,CASH_CREDIT,3.0,EUR,656.31,NL0000000002,Dutch NV,,,EUR,EUREUR,1.0,,,EUR,3.0,3.0,0.0,
+2024-03-01 10:00:00.000000,trades,Sell Trade,ASSET_TRADE_SELL,-120.0,USD,,US0000000001,Acme Inc,1.0,120.0,USD,,,10.0,EUR,,,,,Order Partial Id: cccccccc-0000-0000-0000-000000000003 - 1
+2024-03-01 10:00:00.010000,trades,Sell Trade,CASH_CREDIT,110.0,EUR,766.31,US0000000001,Acme Inc,1.0,120.0,USD,EURUSD,1.090909,10.0,EUR,,,,,Order Partial Id: cccccccc-0000-0000-0000-000000000003 - 1
+2024-03-05 11:00:00.000000,fees,Subscription Fee,CASH_DEBIT,-2.99,EUR,763.32,,,,,,,,,,,,,,Period: 2024-02
+2024-03-06 11:00:00.000000,interest,Interest Payment,CASH_CREDIT,0.5,EUR,763.82,,,,,,,,,,,,,,Period: 2024 Q1
+2024-03-07 11:00:00.000000,tax,Financial Transaction Tax Refund,CASH_CREDIT,0.2,EUR,764.02,US0000000001,Acme Inc,,,,,,,,,,,,
+2024-04-01 09:00:00.000000,corporate_actions,General Corporate Action,ASSET_REDEEM,-160.0,EUR,,NL0000000002,Dutch NV,10.0,16.0,EUR,EUREUR,1.0,10.0,EUR,,,,,Tender offer Dutch NV
+2024-04-01 09:00:05.000000,corporate_actions,General Corporate Action,CASH_CREDIT,180.0,EUR,944.02,XX0000000000,Wrong Label,,,EUR,EUREUR,1.0,,,,,,,Tender offer Dutch NV Cash
+2024-04-02 09:00:00.000000,corporate_actions,General Corporate Action,ASSET_DEPOSIT,50.0,EUR,,COIN,Some Coin,5.0,10.0,EUR,EUREUR,1.0,,,,,,,,Fixing
+2024-04-03 09:00:00.000000,others,Portfolio Transfer,ASSET_REDEEM,-50.0,EUR,,COIN,Some Coin,5.0,10.0,EUR,EUREUR,1.0,0.0,EUR,,,,,
+2024-05-01 09:00:00.000000,withdrawals,Sepa Withdrawal,CASH_DEBIT,-100.0,EUR,844.02,,,,,,,,,,,,,,

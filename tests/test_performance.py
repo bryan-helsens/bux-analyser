@@ -67,7 +67,10 @@ def test_multicurrency_valuation_uses_fx_and_cash_in_base():
 
 
 def test_missing_price_never_fabricates():
-    txns = [tx(1, T.BUY, (2024, 1, 1), isin="X", quantity=D("1"), price=D("10"))]
-    h = valuation_history(txns, {}, {}, {"X": "EUR"}, end=date(2024, 1, 2))
-    assert h["total"].isna().all()
+    txns = [tx(1, T.BUY, (2024, 1, 1), isin="X", quantity=D("1"), price=D("10")),
+            tx(2, T.SELL, (2024, 1, 2), isin="X", quantity=D("1"), price=D("10"))]
+    h = valuation_history(txns, {}, {}, {"X": "EUR"}, end=date(2024, 1, 3))
+    assert h["total"].isna().iloc[0] and not h["total"].isna().iloc[2]  # unknown only while held
     assert portfolio_xirr(h) is None
+    h2 = valuation_history(txns, {}, {}, {"X": "EUR"}, end=date(2024, 1, 3), at_cost={"X": 10.0})
+    assert h2["total"].iloc[0] == 0.0 and h2.attrs["at_cost"] == {"X": ("2024-01-01", "2024-01-01")}

@@ -9,13 +9,14 @@ Status: research phase. Documents:
 
 ## Phase 1 status
 
-Built and tested (CSV-independent foundation):
+Working end to end on a real 2026 BUX export (465 rows → 394 transactions, cash reconciled to the cent against BUX's own running balance):
 
-- `bux_analyser/core/` — transaction model, average-cost ledger (positions, realized/unrealized P/L, dividends, fees, cash, deposits/withdrawals), valuation history, TWR, XIRR
-- `bux_analyser/marketdata/` — provider abstraction with provenance on every value, Yahoo price provider, ECB FX provider (Frankfurter), cache-first SQLite store with health tracking and graceful degradation
-- `bux_analyser/db.py` — SQLite schema (personal data + rebuildable cache), raw import rows always preserved
-
-Waiting on the real BUX export before writing the importer and the dashboard.
+- `docs/bux-import-spec.md` — the export format as it actually is (two-row trades, fee/tax rows, dividend gross/net/tax, corporate-action pairs, effective FX)
+- `bux_analyser/importers/` — parser + idempotent persistence (every source row hashed; raw rows kept)
+- `bux_analyser/core/` — average-cost ledger, valuation history, TWR, XIRR
+- `bux_analyser/marketdata/` — provider abstraction with provenance, Yahoo prices, ECB FX, cache-first SQLite store
+- `bux_analyser/service.py` — snapshot for the dashboard; `bux_analyser/cli.py`; `app.py` (Streamlit)
+- 21 deterministic tests on synthetic fixtures (your export is never committed)
 
 ### Run locally
 
@@ -23,6 +24,12 @@ Waiting on the real BUX export before writing the importer and the dashboard.
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 pytest -q
+python -m bux_analyser.cli import /path/to/bux_export.csv   # or upload in the app
+python -m bux_analyser.cli refresh                          # prices + FX (Yahoo, ECB)
+python -m bux_analyser.cli status
+streamlit run app.py
 ```
 
-All personal data stays in `data/` (git-ignored). Only public price/FX requests leave the machine.
+If a symbol resolves wrongly: `python -m bux_analyser.cli set-ticker <ISIN> <YAHOO_SYMBOL>` then refresh.
+
+All personal data stays in `data/` (git-ignored). Only public symbols are sent to Yahoo/ECB.

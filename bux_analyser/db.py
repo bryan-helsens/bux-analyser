@@ -4,11 +4,26 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text,
+from decimal import Decimal
+
+from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, String, Text, TypeDecorator,
                         UniqueConstraint, create_engine, event)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .config import DB_PATH
+
+
+class Money(TypeDecorator):
+    """Exact decimals stored as text. SQLite has no decimal type and SQLAlchemy's Numeric
+    would silently go through float; personal accounting must round-trip exactly."""
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else str(Decimal(value))
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else Decimal(value)
 
 
 class Base(DeclarativeBase):
@@ -24,6 +39,16 @@ class ImportBatch(Base):
     row_count: Mapped[int] = mapped_column(Integer)
     new_rows: Mapped[int] = mapped_column(Integer)
     warnings: Mapped[str] = mapped_column(Text, default="")
+
+
+class ImportedRow(Base):
+    """Every source row ever seen, keyed by its hash → idempotent re-imports, even for
+    rows that were merged into another transaction or deliberately skipped."""
+    __tablename__ = "imported_row"
+    rid: Mapped[str] = mapped_column(String, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("import_batch.id"))
+    txn_id: Mapped[str | None] = mapped_column(String)   # transaction it produced or was merged into
+    status: Mapped[str] = mapped_column(String)          # imported | merged | skipped
 
 
 class Security(Base):
@@ -48,12 +73,12 @@ class Transaction(Base):
     isin: Mapped[str | None] = mapped_column(ForeignKey("security.isin"))
     name: Mapped[str | None] = mapped_column(String)
     currency: Mapped[str] = mapped_column(String(3))
-    fx_rate: Mapped[float] = mapped_column(Numeric(20, 10))
-    quantity: Mapped[float] = mapped_column(Numeric(20, 8), default=0)
-    price: Mapped[float] = mapped_column(Numeric(20, 8), default=0)
-    fee: Mapped[float] = mapped_column(Numeric(20, 8), default=0)
-    tax: Mapped[float] = mapped_column(Numeric(20, 8), default=0)
-    amount: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    fx_rate: Mapped[Decimal] = mapped_column(Money)
+    quantity: Mapped[Decimal] = mapped_column(Money, default=0)
+    price: Mapped[Decimal] = mapped_column(Money, default=0)
+    fee: Mapped[Decimal] = mapped_column(Money, default=0)
+    tax: Mapped[Decimal] = mapped_column(Money, default=0)
+    amount: Mapped[Decimal | None] = mapped_column(Money)
     note: Mapped[str] = mapped_column(Text, default="")
     raw: Mapped[str] = mapped_column(Text)                      # original row as JSON, always kept
 
@@ -64,7 +89,7 @@ class PriceEod(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     isin: Mapped[str] = mapped_column(String, index=True)
     date: Mapped[date] = mapped_column(Date)
-    close: Mapped[float] = mapped_column(Numeric(20, 8))
+    close: Mapped[Decimal] = mapped_column(Money)
     currency: Mapped[str] = mapped_column(String(3))
     provider: Mapped[str] = mapped_column(String)
     source: Mapped[str] = mapped_column(String)
@@ -78,7 +103,7 @@ class FxRate(Base):
     currency: Mapped[str] = mapped_column(String(3), index=True)
     base: Mapped[str] = mapped_column(String(3))
     date: Mapped[date] = mapped_column(Date)
-    rate: Mapped[float] = mapped_column(Numeric(20, 10))   # base per 1 unit of currency
+    rate: Mapped[Decimal] = mapped_column(Money)   # base per 1 unit of currency
     provider: Mapped[str] = mapped_column(String)
     source: Mapped[str] = mapped_column(String)
     retrieved_at: Mapped[datetime] = mapped_column(DateTime)
@@ -87,8 +112,8 @@ class FxRate(Base):
 class QuoteCache(Base):
     __tablename__ = "quote_cache"
     isin: Mapped[str] = mapped_column(String, primary_key=True)
-    price: Mapped[float] = mapped_column(Numeric(20, 8))
-    previous_close: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    price: Mapped[Decimal] = mapped_column(Money)
+    previous_close: Mapped[Decimal | None] = mapped_column(Money)
     currency: Mapped[str] = mapped_column(String(3))
     provider: Mapped[str] = mapped_column(String)
     source: Mapped[str] = mapped_column(String)

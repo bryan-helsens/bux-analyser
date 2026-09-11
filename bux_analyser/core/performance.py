@@ -17,7 +17,7 @@ def _fx_frame(fx: dict[str, pd.Series], idx: pd.DatetimeIndex, base: str) -> pd.
     """Columns = currency, values = base per 1 unit, forward-filled onto idx."""
     cols = {base: pd.Series(1.0, index=idx)}
     for ccy, s in fx.items():
-        cols[ccy] = s.sort_index().reindex(idx, method="ffill")
+        cols[ccy] = s.sort_index().reindex(idx, method="ffill") if not s.empty else pd.Series(np.nan, index=idx)
     return pd.DataFrame(cols)
 
 
@@ -28,6 +28,7 @@ def valuation_history(
     currency_of: dict[str, str],
     base: str = "EUR",
     end: date | None = None,
+    at_cost: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """Daily frame with columns: securities_value, cash, total, external_flow, net_invested.
 
@@ -35,6 +36,9 @@ def valuation_history(
     - fx[ccy]: Series of base-per-unit rates.
     - Cash is tracked in base currency from transaction cash effects (BUX cash is EUR).
     - external_flow: deposits (+) / withdrawals (−) on that day, in base.
+    - at_cost[isin]: local-currency cost per unit to use when no price series exists
+      (e.g. delisted or crypto). Days valued this way are listed in df.attrs["at_cost"].
+      Without a fallback, days on which an unpriced security is held have total = NaN.
     """
     if not txns:
         return pd.DataFrame(columns=["securities_value", "cash", "total", "external_flow", "net_invested"])
@@ -53,29 +57,38 @@ def valuation_history(
         cash[d] += float(t.cash_effect_base)
         if t.type in EXTERNAL_FLOW_TYPES:
             flow[d] += float((t.amount or Decimal(0)) * t.fx_rate)
-        if t.type == TxnType.BUY:
+        if t.type in (TxnType.BUY, TxnType.TRANSFER_IN):
             qty.loc[d, t.isin] += float(t.quantity)
-        elif t.type == TxnType.SELL:
+        elif t.type in (TxnType.SELL, TxnType.TRANSFER_OUT):
             qty.loc[d, t.isin] -= float(t.quantity)
     qty = qty.cumsum()
     cash = cash.cumsum()
 
     sec_val = pd.Series(0.0, index=idx)
+    at_cost_used: dict[str, tuple[str, str]] = {}
     for isin in qty.columns:
         held = qty[isin]
-        if (held.abs() < 1e-12).all():
+        is_held = held.abs() > 1e-12
+        if not is_held.any():
             continue
         p = prices.get(isin)
         if p is None or p.empty:
-            sec_val += np.nan  # unknown value → total becomes NaN on those days (never fabricate)
-            continue
+            if at_cost and isin in at_cost:
+                p = pd.Series(float(at_cost[isin]), index=idx)
+                days = idx[is_held]
+                at_cost_used[isin] = (str(days[0].date()), str(days[-1].date()))
+            else:
+                sec_val = sec_val.where(~is_held, np.nan)  # unknown only on days it was held
+                continue
         p = p.sort_index().reindex(idx, method="ffill")
-        rate = fxf[currency_of.get(isin, base)]
-        sec_val += (held * p * rate).where(held.abs() > 1e-12, 0.0)
+        ccy = currency_of.get(isin, base)
+        rate = fxf[ccy] if ccy in fxf.columns else pd.Series(np.nan, index=idx)  # unknown FX → unknown value
+        sec_val += (held * p * rate).where(is_held, 0.0)
 
     out = pd.DataFrame({"securities_value": sec_val, "cash": cash, "external_flow": flow})
     out["total"] = out["securities_value"] + out["cash"]
     out["net_invested"] = flow.cumsum()
+    out.attrs["at_cost"] = at_cost_used
     return out
 
 
