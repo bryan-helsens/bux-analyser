@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Personal data never leaves this machine and never enters git
+data/
+!data/.gitkeep
+*.db
+.env
