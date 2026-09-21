@@ -25,10 +25,21 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 pytest -q
 python -m bux_analyser.cli import /path/to/bux_export.csv   # or upload in the app
-python -m bux_analyser.cli refresh                          # prices + FX (Yahoo, ECB)
-python -m bux_analyser.cli status
+python -m bux_analyser.cli reconcile                        # refresh + full verification report
 streamlit run app.py
 ```
+
+To check the numbers against the BUX app:
+
+```bash
+python -m bux_analyser.cli reconcile --template     # writes data/bux_figures.csv
+# fill in quantity / average price / value per holding from the app, then:
+python -m bux_analyser.cli reconcile data/bux_figures.csv
+```
+
+Quantity and average cost come purely from the export and must match the app exactly.
+Values depend on a live price, so small differences from delayed quotes and ECB reference
+rates are reported but not treated as errors.
 
 If a symbol resolves wrongly: `python -m bux_analyser.cli set-ticker <ISIN> <YAHOO_SYMBOL>` then refresh.
 
