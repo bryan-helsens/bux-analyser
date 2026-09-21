@@ -17,6 +17,9 @@ from bux_analyser import alerts as alert_engine
 from bux_analyser import intelligence as intel_engine
 from bux_analyser.analytics import simulate as sim
 from bux_analyser.analytics.portfolio import ETF_BUCKET
+from bux_analyser.ai.tools import PortfolioTools
+from bux_analyser.analytics import backtest as bt
+from bux_analyser.analytics import factors as fa
 from bux_analyser.analytics.scoring import PILLAR_DEFINITIONS, Thresholds, unavailable_labels
 from bux_analyser.db import make_engine, session_factory
 from bux_analyser.importers.persist import import_bux_file
@@ -131,7 +134,7 @@ for w in snapshot.warnings:
     st.warning(w)
 
 tabs = st.tabs(["Overview", "Performance", "Exposure", "Risk", "Signals", "Scenarios",
-                "Holdings", "Transactions"])
+                "Holdings", "Research", "Transactions"])
 
 # ---------------------------------------------------------------- holdings frame
 rows = []
@@ -322,7 +325,7 @@ with st.sidebar:
                          help="A holding contributing more than this share of portfolio volatility.")
 thresholds = Thresholds(max_weight=max_weight, max_risk_share=max_risk)
 
-intel = intel_engine.build(session, snapshot, thresholds=thresholds)
+intel = intel_engine.build(session, snapshot, thresholds=thresholds, store=store)
 
 with tabs[4]:
     st.caption("Scores rank your holdings against each other from data you already hold. "
@@ -377,7 +380,7 @@ with tabs[4]:
             for rec in [r for r in intel.recommendations if not r.is_actionable]:
                 st.markdown(f"**{rec.name}** — {rec.label}: {rec.reasons[0] if rec.reasons else ''}")
 
-        for label, why in unavailable_labels().items():
+        for label, why in unavailable_labels(intel.scores).items():
             st.caption(f"**{label}** is not produced: {why}")
 
     st.subheader("Alerts")
@@ -554,6 +557,40 @@ with tabs[6]:
         c[2].metric("Realised P/L", eur(h.realized_pl_base))
         c[3].metric("Sector", (ETF_BUCKET if h.asset_type == "etf" else (h.sector or "unknown")))
 
+        metrics = (intel.fundamentals or {}).get(h.isin)
+        if metrics is None:
+            st.info("No financial statements are cached for this holding. Free filings cover "
+                    "US-listed companies; European names rely on a best-effort source that "
+                    "often returns nothing.")
+        else:
+            st.markdown(f"**Financials** — period ending {metrics.period_end}"
+                        + (f", filed {metrics.reported_at}" if metrics.reported_at else ""))
+            groups = {"Valuation": ["price_to_earnings", "ev_to_ebit", "price_to_sales",
+                                    "price_to_book", "fcf_yield", "earnings_yield"],
+                      "Growth": ["revenue_growth_1y", "revenue_cagr_3y", "earnings_cagr_3y",
+                                 "fcf_cagr_3y"],
+                      "Quality": ["return_on_equity", "return_on_capital", "gross_margin",
+                                  "operating_margin", "net_margin", "fcf_conversion",
+                                  "debt_to_equity", "net_debt_to_ebit"]}
+            cols = st.columns(3)
+            for col, (title, keys) in zip(cols, groups.items()):
+                with col:
+                    st.markdown(f"*{title}*")
+                    for key in keys:
+                        value = metrics.get(key)
+                        if value is None:
+                            continue
+                        label = key.replace("_", " ").capitalize()
+                        shown = (f"{value:.1%}" if key.endswith(("yield", "margin", "growth",
+                                                                 "cagr_3y", "conversion",
+                                                                 "on_equity", "on_capital"))
+                                 else f"{value:,.2f}")
+                        st.markdown(f"{label}: **{shown}**")
+            for n in metrics.notes:
+                st.caption(n)
+            st.caption(f"Source: {metrics.quality} statements"
+                       + (f", filed {metrics.reported_at}." if metrics.reported_at else "."))
+
         for i in h.issues:
             st.warning(i)
 
@@ -583,8 +620,144 @@ with tabs[6]:
                 picked[n] = s
             st.plotly_chart(charts.price_comparison(picked, theme), width="stretch", key="compare")
 
-# ---------------------------------------------------------------- Transactions
+
+# ---------------------------------------------------------------- Research
 with tabs[7]:
+    st.subheader("Does a rule actually work?")
+    st.caption("This replays a rule over the price history you hold, trading only on what was "
+               "known at the time. Read the limits below before believing any number here.")
+    if an is None or an.eur_prices.empty or an.eur_prices.shape[1] < 2:
+        st.info("Backtesting needs price history for at least two holdings.")
+    else:
+        prices = an.eur_prices.dropna(how="all")
+        names = {h.isin: (h.name or h.isin) for h in snapshot.holdings}
+        c = st.columns(4)
+        strategy_name = c[0].selectbox("Rule", ["Momentum", "Low volatility", "Equal weight"])
+        positions = c[1].slider("Hold at most", 1, max(2, prices.shape[1]),
+                                min(5, prices.shape[1]))
+        frequency = c[2].selectbox("Rebalance", ["Monthly", "Quarterly", "Yearly"], index=1)
+        cost = c[3].slider("Cost per trade", 0.0, 1.0, 0.25, 0.05, format="%.2f%%",
+                           help="Charged on the value traded, covering fees and the spread.")
+        config = bt.BacktestConfig(rebalance={"Monthly": "ME", "Quarterly": "QE", "Yearly": "YE"}[frequency],
+                                   cost_bps=cost * 100, max_positions=positions)
+        signal = {"Momentum": bt.momentum_signal(), "Low volatility": bt.low_volatility_signal(),
+                  "Equal weight": bt.equal_weight_signal()}[strategy_name]
+
+        if st.button("Run the backtest", type="primary"):
+            with st.spinner("Replaying history and testing it against chance…"):
+                strategy = bt.run(prices, signal, config, label=strategy_name)
+                hold = bt.buy_and_hold(prices, config)
+                verdict = bt.permutation_test(prices, signal, config, runs=120)
+            st.session_state["backtest"] = (strategy, hold, verdict, strategy_name)
+
+        if "backtest" in st.session_state:
+            strategy, hold, verdict, label = st.session_state["backtest"]
+            if strategy is None:
+                st.warning("Not enough history to run this. A year of prices is needed before the "
+                           "first trade.")
+            else:
+                results = [r for r in (strategy, hold) if r is not None]
+                table = bt.compare(results)
+                st.plotly_chart(charts.price_comparison(
+                    {r.label: r.equity for r in results}, theme), width="stretch", key="bt_curve")
+                st.dataframe(table.rename(columns=lambda c: c.replace("_", " ").capitalize()),
+                             width="stretch",
+                             column_config={c: st.column_config.NumberColumn(format="percent")
+                                            for c in ["Total return", "Cagr", "Volatility",
+                                                      "Max drawdown", "Win rate", "Costs paid"]})
+                p = verdict.get("p_value")
+                if p is None:
+                    st.info("The significance test could not run on this history.")
+                elif p > 0.10:
+                    st.warning(f"Shuffling the signal at random beat this result {p:.0%} of the "
+                               f"time. On this data the rule shows no skill: the outcome is "
+                               f"consistent with luck.")
+                else:
+                    st.success(f"Random orderings of the same signal beat this result only "
+                               f"{p:.0%} of the time. That is suggestive, not proof, and it is "
+                               f"one test on one short history.")
+                st.caption(f"Sharpe {verdict.get('actual_sharpe', float('nan')):.2f} against a "
+                           f"median of {verdict.get('null_median', float('nan')):.2f} from "
+                           f"{verdict.get('runs', 0)} random runs.")
+                with st.expander("What this backtest cannot tell you", expanded=True):
+                    for bias in strategy.biases:
+                        st.markdown(f"- {bias}")
+
+    st.divider()
+    st.subheader("What kind of bets is this portfolio making?")
+    if an is None or an.portfolio_returns.empty:
+        st.info("Factor analysis needs return history.")
+    else:
+        if st.button("Fetch factor data and analyse"):
+            with st.spinner("Downloading the Kenneth French factor data…"):
+                provider = fa.FrenchFactorProvider()
+                frame = provider.factors("developed")
+                st.session_state["factors"] = frame
+        frame = st.session_state.get("factors")
+        if frame is None:
+            st.caption("Factor returns come from the Kenneth French data library, which is free "
+                       "and updated periodically. Nothing is sent: only the public file is fetched.")
+        elif frame.empty:
+            st.warning("The factor file could not be read.")
+        else:
+            rf = frame["RF"] if "RF" in frame.columns else 0.0
+            excess = an.portfolio_returns - (rf if isinstance(rf, float) else rf.reindex(
+                an.portfolio_returns.index).fillna(0.0))
+            columns = [c for c in frame.columns if c != "RF"]
+            exposure = fa.regress(excess, frame[columns], dataset="developed")
+            if exposure is None:
+                st.warning("Not enough overlap between your history and the factor data.")
+            else:
+                for line in exposure.describe():
+                    st.markdown(f"- {line}")
+                c = st.columns(3)
+                c[0].metric("Explained by factors", pct(exposure.r_squared, 0, sign=False))
+                c[1].metric("Alpha a year", pct(exposure.alpha_annual, 1))
+                c[2].metric("Days analysed", f"{exposure.n_obs:,}")
+                st.dataframe(pd.DataFrame({
+                    "Factor": [fa.FACTOR_LABELS.get(k, k) for k in exposure.loadings],
+                    "Loading": list(exposure.loadings.values()),
+                    "t-statistic": [exposure.t_statistics[k] for k in exposure.loadings]}),
+                    width="stretch", hide_index=True)
+                st.caption("A t-statistic beyond about 2 means the tilt is unlikely to be noise. "
+                           "These describe how the portfolio has behaved; they do not predict.")
+                for n in exposure.notes:
+                    st.caption(n)
+
+    st.divider()
+    st.subheader("Ask about the portfolio")
+    tools = PortfolioTools(snapshot, intel)
+    holding_names = [h.name for h in snapshot.holdings]
+    questions = {
+        "How is the portfolio doing?": ("get_portfolio_summary", {}),
+        "How am I doing against the market?": ("get_performance", {}),
+        "What are my biggest risks?": ("get_risk_metrics", {}),
+        "Which holdings carry the most risk?": ("get_risk_contributors", {}),
+        "Am I overexposed to one sector?": ("get_allocation", {"dimension": "sector"}),
+        "What is my currency exposure?": ("get_allocation", {"dimension": "currency"}),
+        "What has crossed an alert?": ("get_alerts", {}),
+        "Tell me about one holding": ("get_position", {"query": None}),
+        "Why does a holding have its signal?": ("get_recommendation_reasons", {"query": None}),
+        "What do the financials say?": ("get_fundamentals", {"query": None}),
+    }
+    chosen = st.selectbox("Question", list(questions))
+    function, kwargs = questions[chosen]
+    kwargs = dict(kwargs)
+    if "query" in kwargs and holding_names:
+        kwargs["query"] = st.selectbox("Holding", holding_names, key="ask_holding")
+    answer = tools.call(function, **kwargs)
+    st.markdown(f"**{answer.summary}**")
+    if answer.table is not None and not answer.table.empty:
+        st.dataframe(answer.table, width="stretch")
+    for caveat in answer.caveats:
+        st.caption(f"Note: {caveat}")
+    if answer.sources:
+        st.caption("Based on: " + "; ".join(answer.sources))
+    st.caption("These answers are produced by the application's own calculations, not by a "
+               "language model. Every figure comes from your data.")
+
+# ---------------------------------------------------------------- Transactions
+with tabs[8]:
     from bux_analyser.importers.persist import load_txns
     txns = load_txns(session)
     tx_df = pd.DataFrame([{

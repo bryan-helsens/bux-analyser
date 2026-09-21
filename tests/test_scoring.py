@@ -49,13 +49,68 @@ def test_scores_rank_holdings_against_each_other():
 
 
 def test_fundamental_pillars_report_as_unavailable_not_as_zero():
+    """With only price metrics supplied, the three fundamental pillars must say they
+    have nothing rather than scoring zero, which would read as 'bad'."""
     s = build_scores(sample_frame(), {}, TODAY)["STRONG"]
     for key in ("valuation", "growth", "quality"):
         p = s.pillars[key]
         assert p.score is None and not p.available
-        assert p.unavailable_reason == NEEDS_FUNDAMENTALS
+        assert "fundamentals" in p.unavailable_reason
     assert s.coverage == pytest.approx(2 / 5)
     assert any("Valuation, Growth, Quality" in n for n in s.notes)
+
+
+def fundamental_frame():
+    """Price metrics plus enough fundamentals for all five pillars."""
+    f = sample_frame()
+    extras = {
+        "STRONG": {"price_to_earnings": 12.0, "ev_to_ebit": 9.0, "price_to_sales": 1.2,
+                   "fcf_yield": 0.08, "price_to_book": 1.5, "revenue_cagr_3y": 0.15,
+                   "earnings_cagr_3y": 0.20, "fcf_cagr_3y": 0.18, "revenue_growth_1y": 0.12,
+                   "return_on_equity": 0.25, "return_on_capital": 0.18, "gross_margin": 0.55,
+                   "fcf_conversion": 1.1, "debt_to_equity": 0.2},
+        "MIDDLE": {"price_to_earnings": 20.0, "ev_to_ebit": 15.0, "price_to_sales": 2.5,
+                   "fcf_yield": 0.04, "price_to_book": 3.0, "revenue_cagr_3y": 0.06,
+                   "earnings_cagr_3y": 0.05, "fcf_cagr_3y": 0.04, "revenue_growth_1y": 0.05,
+                   "return_on_equity": 0.12, "return_on_capital": 0.09, "gross_margin": 0.35,
+                   "fcf_conversion": 0.8, "debt_to_equity": 0.8},
+        "WEAK": {"price_to_earnings": 45.0, "ev_to_ebit": 38.0, "price_to_sales": 9.0,
+                 "fcf_yield": 0.005, "price_to_book": 8.0, "revenue_cagr_3y": -0.05,
+                 "earnings_cagr_3y": -0.12, "fcf_cagr_3y": -0.20, "revenue_growth_1y": -0.08,
+                 "return_on_equity": 0.03, "return_on_capital": 0.02, "gross_margin": 0.15,
+                 "fcf_conversion": 0.3, "debt_to_equity": 2.5},
+    }
+    for isin, values in extras.items():
+        for key, value in values.items():
+            f.loc[isin, key] = value
+    return f
+
+
+def test_all_five_pillars_score_once_fundamentals_are_present():
+    scores = build_scores(fundamental_frame(), {}, TODAY)
+    strong = scores["STRONG"]
+    assert strong.coverage == pytest.approx(1.0)
+    for key in ("valuation", "growth", "quality", "momentum", "risk"):
+        assert strong.pillars[key].available, key
+    assert strong.pillars["valuation"].score == pytest.approx(100.0)   # cheapest on every ratio
+    assert scores["WEAK"].pillars["quality"].score == pytest.approx(100 / 3, abs=1)
+    assert strong.overall > scores["MIDDLE"].overall > scores["WEAK"].overall
+
+
+def test_opportunity_appears_only_when_valuation_supports_it():
+    scores = build_scores(fundamental_frame(), {}, TODAY)
+    rec = recommend(scores["STRONG"], None, weight=0.05, risk_share=0.05, max_drawdown=-0.05)
+    assert rec.label == OPPORTUNITY
+    assert "cheaper of your holdings" in rec.reasons[0]
+    assert rec.invalidators
+    assert unavailable_labels(scores) == {}          # the label is no longer impossible
+    assert OPPORTUNITY in unavailable_labels(None)   # but it is without fundamentals
+
+
+def test_an_expensive_holding_is_flagged_as_a_risk():
+    scores = build_scores(fundamental_frame(), {}, TODAY)
+    rec = recommend(scores["WEAK"], None, weight=0.05, risk_share=0.05, max_drawdown=-0.05)
+    assert any("relatively expensive" in r for r in rec.risks)
 
 
 def test_overall_is_suppressed_when_too_little_is_available():
@@ -130,7 +185,7 @@ def test_hold_is_the_default_and_says_so():
     assert "crosses a threshold" in rec.reasons[0]
 
 
-def test_every_recommendation_admits_valuation_is_missing():
+def test_a_recommendation_admits_when_valuation_is_missing():
     s = build_scores(sample_frame(), {}, TODAY)["STRONG"]
     rec = recommend(s, None, weight=0.05, risk_share=0.05, max_drawdown=-0.05)
     assert any("Valuation is not assessed" in r for r in rec.risks)

@@ -58,6 +58,7 @@ class Analytics:
     benchmarks: list[BenchmarkComparison] = field(default_factory=list)
     correlation: pd.DataFrame = field(default_factory=pd.DataFrame)
     risk_contribution: pd.DataFrame = field(default_factory=pd.DataFrame)
+    lookthrough_funds: list[str] = field(default_factory=list)
     concentration: Concentration | None = None
     exposures: dict[str, Exposure] = field(default_factory=dict)
     decomposition: Decomposition | None = None
@@ -99,35 +100,76 @@ def _bucket(values: dict[str, str | None], weights: pd.Series, dimension: str, n
     return Exposure(dimension=dimension, weights=grouped, unknown_weight=unknown, note=note)
 
 
-def build_exposures(weights: pd.Series, meta: dict[str, dict]) -> dict[str, Exposure]:
+def _looked_through(weights: pd.Series, meta: dict[str, dict], lookthrough: dict[str, pd.DataFrame],
+                    key: str, dimension: str, note: str) -> Exposure:
+    """Spread each fund's weight across its constituents on one dimension.
+
+    A fund whose holdings we have is dissolved into them. A fund whose holdings we do
+    not have keeps its own bucket, so the chart never implies knowledge we lack.
+    """
+    totals: dict[str, float] = {}
+    for isin, weight in weights.items():
+        table = lookthrough.get(isin)
+        if table is not None and key in table.columns and not table.empty:
+            covered = table[table[key].notna()]
+            share = float(covered["weight"].sum())
+            if share > 0.5:                       # enough of the fund is classified to be useful
+                for label, group_weight in covered.groupby(key)["weight"].sum().items():
+                    totals[str(label)] = totals.get(str(label), 0.0) + weight * float(group_weight)
+                leftover = weight * (1.0 - share)
+                if leftover > 1e-9:
+                    totals[UNKNOWN] = totals.get(UNKNOWN, 0.0) + leftover
+                continue
+        if (meta.get(isin) or {}).get("asset_type") == "etf":
+            label = ETF_BUCKET
+        else:
+            label = (meta.get(isin) or {}).get(key) or UNKNOWN
+        totals[label] = totals.get(label, 0.0) + float(weight)
+
+    series = pd.Series(totals).sort_values(ascending=False)
+    total = float(series.sum())
+    if total > 0:
+        series = series / total
+    unknown = float(series.get(UNKNOWN, 0.0)) + float(series.get(ETF_BUCKET, 0.0))
+    return Exposure(dimension=dimension, weights=series, unknown_weight=unknown, note=note)
+
+
+def build_exposures(weights: pd.Series, meta: dict[str, dict],
+                    lookthrough: dict[str, pd.DataFrame] | None = None) -> dict[str, Exposure]:
     """Break the portfolio down by currency, asset type, sector and country.
 
-    ETFs are shown as one bucket rather than spread across sectors: without the fund's
-    constituent list, any sector split would be invented. Currency is the listing
-    currency, which for an ETF is not the currency of what it holds.
+    Where a fund's constituent list has been loaded, the fund is looked through and its
+    weight spread across what it actually holds. Where it has not, the fund stays as a
+    single bucket: inventing a sector split for an unknown fund would be worse than
+    admitting the gap.
     """
     if weights is None or weights.empty:
         return {}
     w = weights[weights > 0]
     if w.empty:
         return {}
+    lookthrough = lookthrough or {}
     g = lambda key: {isin: (meta.get(isin) or {}).get(key) for isin in w.index}
-    is_etf = {isin: ((meta.get(isin) or {}).get("asset_type") == "etf") for isin in w.index}
-    sectors = {isin: (ETF_BUCKET if is_etf[isin] else (meta.get(isin) or {}).get("sector")) for isin in w.index}
-    countries = {isin: (ETF_BUCKET if is_etf[isin] else (meta.get(isin) or {}).get("country")) for isin in w.index}
+    any_lookthrough = any(isin in lookthrough for isin in w.index)
+    suffix = (" Funds whose holdings have been loaded are spread across what they hold."
+              if any_lookthrough else
+              " Funds are shown whole: their constituent lists have not been loaded.")
     return {
-        "currency": _bucket(g("currency"), w, "Currency",
-                            "Listing currency. For an ETF this is not the currency of its holdings."),
+        "currency": _looked_through(w, meta, lookthrough, "currency", "Currency",
+                                    "Currency of the underlying holdings. A fund whose list has "
+                                    "not been loaded is shown separately rather than counted as "
+                                    "its listing currency, which would overstate euro exposure."),
         "asset_type": _bucket(g("asset_type"), w, "Asset type"),
-        "sector": _bucket(sectors, w, "Sector",
-                          "ETFs are shown as one bucket: their constituents are not yet loaded."),
-        "country": _bucket(countries, w, "Country",
-                           "Country of the company's domicile, not of its revenue."),
+        "sector": _looked_through(w, meta, lookthrough, "sector", "Sector",
+                                  "Sector of the underlying companies." + suffix),
+        "country": _looked_through(w, meta, lookthrough, "country", "Country",
+                                   "Country of the company's domicile, not of its revenue." + suffix),
     }
 
 
 def build(holdings, prices, fx, currency_of, meta, twr_index, history_index,
-          benchmark_series=None, risk_free: float = 0.0, base: str = "EUR") -> Analytics:
+          benchmark_series=None, risk_free: float = 0.0, base: str = "EUR",
+          lookthrough: dict[str, pd.DataFrame] | None = None) -> Analytics:
     """Assemble every portfolio analytic we can support from the data available."""
     a = Analytics()
     valued = [h for h in holdings if h.value_base is not None and h.value_base > 0]
@@ -135,7 +177,8 @@ def build(holdings, prices, fx, currency_of, meta, twr_index, history_index,
     if not weights.empty:
         weights = weights / weights.sum()
 
-    a.exposures = build_exposures(weights, meta)
+    a.exposures = build_exposures(weights, meta, lookthrough)
+    a.lookthrough_funds = [i for i in weights.index if (lookthrough or {}).get(i) is not None]
     a.concentration = concentration(weights)
 
     # --- stock versus currency ------------------------------------------------------

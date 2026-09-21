@@ -62,10 +62,15 @@ def test_exposures_bucket_etfs_instead_of_inventing_sectors():
     ex = build_exposures(w, meta)
     assert ex["sector"].weights[ETF_BUCKET] == pytest.approx(0.3)
     assert ex["sector"].weights["Technology"] == pytest.approx(0.5)
-    assert ex["sector"].unknown_weight == pytest.approx(0.2)   # C has no sector: shown as unknown
-    assert ex["currency"].weights["EUR"] == pytest.approx(0.5)
+    # Unclassified for sector purposes: C has no sector (0.2) and B is a fund whose
+    # holdings have not been loaded (0.3), so neither can be attributed to a sector.
+    assert ex["sector"].unknown_weight == pytest.approx(0.5)
+    # Only the euro-traded stock counts as euro exposure. The euro-listed fund holds
+    # who-knows-what, so it is not counted as euro until its holdings are loaded.
+    assert ex["currency"].weights["EUR"] == pytest.approx(0.2)
+    assert ex["currency"].weights[ETF_BUCKET] == pytest.approx(0.3)
     assert ex["asset_type"].weights["stock"] == pytest.approx(0.7)
-    assert "not the currency of its holdings" in ex["currency"].note
+    assert "overstate euro exposure" in ex["currency"].note
 
 
 def test_snapshot_carries_analytics_with_decomposition(tmp_path):

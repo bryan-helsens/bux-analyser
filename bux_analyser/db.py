@@ -127,6 +127,43 @@ class QuoteCache(Base):
     note: Mapped[str] = mapped_column(String, default="")
 
 
+class FundamentalsCache(Base):
+    """A provider's financial statements, stored whole.
+
+    Kept as the adapter's own JSON rather than shredded into columns: sources disagree
+    about what a period is, and re-parsing from the original beats migrating a schema
+    every time one of them changes.
+    """
+    __tablename__ = "fundamentals_cache"
+    __table_args__ = (UniqueConstraint("isin", "provider"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    isin: Mapped[str] = mapped_column(String, index=True)
+    provider: Mapped[str] = mapped_column(String)
+    payload: Mapped[str] = mapped_column(Text)
+    currency: Mapped[str | None] = mapped_column(String)
+    quality: Mapped[str] = mapped_column(String, default="reported")
+    latest_report: Mapped[date | None] = mapped_column(Date)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class EtfHolding(Base):
+    """One constituent of an ETF, as published by the issuer on a given date."""
+    __tablename__ = "etf_holding"
+    __table_args__ = (UniqueConstraint("etf_isin", "as_of", "constituent"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    etf_isin: Mapped[str] = mapped_column(String, index=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    constituent: Mapped[str] = mapped_column(String)          # ISIN where published, else ticker
+    name: Mapped[str | None] = mapped_column(String)
+    weight: Mapped[Decimal] = mapped_column(Money)            # fraction of the fund
+    sector: Mapped[str | None] = mapped_column(String)
+    country: Mapped[str | None] = mapped_column(String)
+    currency: Mapped[str | None] = mapped_column(String)
+    asset_class: Mapped[str | None] = mapped_column(String)
+    source: Mapped[str] = mapped_column(String)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class AlertRule(Base):
     """A threshold the user chose. Rules are data, not code, so they can be edited
     in the dashboard without touching the engine."""

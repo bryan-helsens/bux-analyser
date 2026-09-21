@@ -40,12 +40,17 @@ class CrashingPrices(MultiPrices):
         return super().eod_history(ids, start, end)
 
 
-def _snapshot(tmp_path, provider=None, name="i.db"):
+def _snapshot_with_store(tmp_path, provider=None, name="i.db"):
     session = session_factory(make_engine(tmp_path / name))()
     import_bux_file(session, FIX, archive=False)
     store = MarketDataStore(session, MarketDataRouter([provider or MultiPrices()], [Fx()]))
     refresh_market_data(session, store)
-    return session, build_snapshot(session, store)
+    return session, store, build_snapshot(session, store)
+
+
+def _snapshot(tmp_path, provider=None, name="i.db"):
+    session, _, snapshot = _snapshot_with_store(tmp_path, provider, name)
+    return session, snapshot
 
 
 def test_metric_frame_is_built_from_euro_prices(tmp_path):
@@ -69,13 +74,42 @@ def test_intelligence_scores_and_recommends(tmp_path):
 
 
 def test_fundamental_pillars_are_reported_missing_not_faked(tmp_path):
+    """No statements are cached for these stubs, so the three fundamental pillars must
+    stay unscored rather than defaulting to something that reads as a judgement."""
     session, snap = _snapshot(tmp_path)
     intel = intelligence.build(session, snap)
     score = next(iter(intel.scores.values()))
     assert score.pillars["valuation"].score is None
     assert score.coverage == pytest.approx(2 / 5)
-    assert any("not loaded yet" in n for n in intel.notes)
+    assert any("nothing can be judged expensive or cheap" in n for n in intel.notes)
     assert any("not with the wider market" in n for n in intel.notes)
+
+
+def test_cached_statements_bring_the_fundamental_pillars_to_life(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from bux_analyser.db import FundamentalsCache
+    from bux_analyser.marketdata.edgar import parse_company_facts
+    from bux_analyser.marketdata.fundamentals import to_json
+
+    session, store, snap = _snapshot_with_store(tmp_path)
+    facts = json.loads((Path(__file__).parent / "fixtures" / "edgar_companyfacts.json").read_text())
+    for isin in ("US0000000001", "NL0000000002", "US0000000004"):
+        f = parse_company_facts(facts, isin, "FIXT")
+        session.add(FundamentalsCache(isin=isin, provider="edgar", payload=json.dumps(to_json(f)),
+                                      currency="USD", quality="reported",
+                                      latest_report=date(2026, 2, 10),
+                                      retrieved_at=datetime.now(timezone.utc)))
+    session.commit()
+
+    intel = intelligence.build(session, snap, store=store)
+    assert intel.fundamentals, "statements in the cache should produce metrics"
+    scored = [s for s in intel.scores.values() if s.pillars["valuation"].available]
+    assert len(scored) == 3
+    for column in ("price_to_earnings", "return_on_equity", "ev_to_ebit", "fcf_yield"):
+        assert column in intel.metrics.columns, column
+    assert intel.metrics["return_on_equity"].notna().sum() == 3
+    assert any("3 of 4 holdings have fundamentals" in n for n in intel.notes)
 
 
 def test_score_snapshots_persist_and_explain_the_next_change(tmp_path):

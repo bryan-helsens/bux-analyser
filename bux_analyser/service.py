@@ -20,12 +20,20 @@ from .db import PriceEod, QuoteCache, Security
 from .importers.persist import load_txns
 from .marketdata.base import Provenance
 from .marketdata.ecb import ECBProvider
+from .marketdata.edgar import EdgarProvider
+from .marketdata.etf_holdings import IssuerHoldingsProvider
 from .marketdata.store import MarketDataRouter, MarketDataStore
 from .marketdata.yahoo import YahooProvider
 
 
 def default_store(session: Session) -> MarketDataStore:
-    return MarketDataStore(session, MarketDataRouter([YahooProvider()], [ECBProvider()]))
+    """Yahoo for prices and best-effort statements, EDGAR for authoritative US filings,
+    the ECB for rates, and issuer files for fund constituents. All free, no keys."""
+    router = MarketDataRouter([YahooProvider()], [ECBProvider()])
+    router.fundamental_providers = [EdgarProvider()]   # tried before Yahoo's scraped figures
+    store = MarketDataStore(session, router)
+    store.issuer_holdings = IssuerHoldingsProvider()
+    return store
 
 
 @dataclass
@@ -111,6 +119,16 @@ def refresh_market_data(session: Session, store: MarketDataStore, txns: list[Txn
             store.ensure_metadata(isin)
     for bm in BENCHMARKS:
         store.ensure_benchmark(bm, first)
+    for isin, p in ledger.open_positions.items():
+        sec = session.get(Security, isin)
+        if sec is None or not sec.ticker:
+            continue
+        if sec.asset_type == "etf":
+            issuer = getattr(store, "issuer_holdings", None)
+            if issuer is not None:
+                store.ensure_etf_holdings(isin, issuer)
+        elif sec.asset_type != "crypto":
+            store.ensure_fundamentals(isin)
     session.commit()
     return list(store.warnings)
 
@@ -228,9 +246,16 @@ def build_snapshot(session: Session, store: MarketDataStore, refresh: bool = Fal
     if not bench:
         warnings.append("No benchmark history cached yet. Run a refresh to enable comparisons.")
 
+    lookthrough = {}
+    for h in holdings:
+        if h.asset_type == "etf":
+            frame = store.get_etf_holdings(h.isin)
+            if frame is not None and not frame.empty:
+                lookthrough[h.isin] = frame
+
     analytics = build_analytics(holdings=holdings, prices=prices, fx=fx, currency_of=price_ccy,
                                 meta=meta, twr_index=twr, history_index=history.index if not history.empty else None,
-                                benchmark_series=bench, base=BASE_CURRENCY)
+                                benchmark_series=bench, base=BASE_CURRENCY, lookthrough=lookthrough)
     warnings += analytics.notes
 
     return Snapshot(as_of=datetime.now(timezone.utc), ledger=ledger, holdings=holdings, history=history, twr=twr,

@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .alerts import AlertContext, Finding, Subject, evaluate, load_rules, record, seed_default_rules
+from .analytics import fundamentals as fund_metrics
 from .analytics import indicators as ind
 from .analytics.risk import annualised_volatility, beta_alpha, max_drawdown
 from .analytics.scoring import (Recommendation, Score, ScoreChange, Thresholds, build_scores,
@@ -23,6 +24,12 @@ from .analytics.scoring import (Recommendation, Score, ScoreChange, Thresholds, 
 from .db import AlertEvent, ScoreSnapshot
 
 TRADING_DAYS = 252
+
+
+FUNDAMENTAL_KEYS = ("price_to_earnings", "ev_to_ebit", "price_to_sales", "fcf_yield",
+                    "price_to_book", "revenue_cagr_3y", "earnings_cagr_3y", "fcf_cagr_3y",
+                    "revenue_growth_1y", "return_on_equity", "return_on_capital", "gross_margin",
+                    "fcf_conversion", "debt_to_equity")
 
 
 @dataclass
@@ -34,6 +41,7 @@ class Intelligence:
     recommendations: list[Recommendation] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     new_events: list[AlertEvent] = field(default_factory=list)
+    fundamentals: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def recommendation_for(self, isin: str) -> Recommendation | None:
@@ -57,7 +65,42 @@ def _risk_shares(snapshot) -> dict[str, float]:
             for name, row in an.risk_contribution.iterrows() if name in by_name}
 
 
-def build_metric_frame(snapshot) -> pd.DataFrame:
+def fundamental_metrics(store, snapshot, as_of: date) -> dict:
+    """Valuation, growth and quality per holding, from cached statements.
+
+    Market capitalisation must be expressed in the same currency as the statements, so
+    the euro price is converted back through the statement currency. Mixing a euro price
+    with dollar revenue would corrupt every valuation ratio without any visible error.
+    """
+    out: dict = {}
+    if store is None:
+        return out
+    for h in snapshot.holdings:
+        if h.asset_type in ("etf", "crypto") or h.price is None or h.fx is None:
+            continue
+        f = store.get_fundamentals(h.isin)
+        if f is None or f.is_empty:
+            continue
+        price_base = float(h.price) * float(h.fx)              # one share, in euros
+        rate = 1.0
+        if f.currency and f.currency != store.base:
+            series, _ = store.fx_history(f.currency, as_of.replace(year=as_of.year - 1), as_of,
+                                         refresh=False)
+            if series is None or series.empty:
+                continue                                        # no rate: skip rather than mix
+            rate = float(series.iloc[-1])
+        price_statement = price_base / rate
+        latest = f.trailing_twelve_months() or f.latest()
+        shares = latest.get("shares_diluted") if latest else None
+        market_cap = price_statement * shares if shares else None
+        metrics = fund_metrics.compute(f, market_cap=market_cap, as_of=as_of,
+                                       price=price_statement)
+        if metrics is not None:
+            out[h.isin] = metrics
+    return out
+
+
+def build_metric_frame(snapshot, fundamentals: dict | None = None) -> pd.DataFrame:
     """Raw metrics per holding, in euros, ready to be ranked.
 
     Momentum and volatility are measured on the euro price, because that is the return
@@ -98,6 +141,13 @@ def build_metric_frame(snapshot) -> pd.DataFrame:
     frame = pd.DataFrame.from_dict(rows, orient="index")
     if frame.empty:
         return frame
+    for isin, metrics in (fundamentals or {}).items():
+        if isin not in frame.index:
+            continue
+        for key in FUNDAMENTAL_KEYS:
+            value = metrics.get(key)
+            if value is not None:
+                frame.loc[isin, key] = value
     shares = _risk_shares(snapshot)
     weights = {h.isin: h.weight for h in snapshot.holdings if h.weight is not None}
     for isin in frame.index:
@@ -177,11 +227,12 @@ def _store_snapshot(session: Session, score: Score) -> None:
 
 
 def build(session: Session, snapshot, thresholds: Thresholds | None = None,
-          persist: bool = True) -> Intelligence:
+          persist: bool = True, store=None) -> Intelligence:
     """Score every holding, explain any change, recommend an action, and fire alerts."""
     as_of = snapshot.as_of.date()
     intel = Intelligence(as_of=as_of)
-    intel.metrics = build_metric_frame(snapshot)
+    intel.fundamentals = fundamental_metrics(store, snapshot, as_of)
+    intel.metrics = build_metric_frame(snapshot, intel.fundamentals)
     if intel.metrics.empty:
         intel.notes.append("Scores need price history. Refresh market data first.")
         return intel
@@ -219,11 +270,18 @@ def build(session: Session, snapshot, thresholds: Thresholds | None = None,
         intel.notes.append(
             "No holding could be scored. Ranking compares holdings with each other, so a "
             "portfolio of one or two priced holdings cannot produce a score.")
-    covered = [s for s in intel.scores.values() if s.overall is not None]
-    if covered and covered[0].coverage < 1.0:
-        intel.notes.append(
-            f"Scores use {covered[0].coverage:.0%} of the intended pillars. Valuation, growth and "
-            "quality need company fundamentals, which are not loaded yet, so a holding cannot "
-            "currently be judged expensive or cheap.")
+    with_fundamentals = sum(1 for s in intel.scores.values()
+                            if s.pillars.get("valuation") and s.pillars["valuation"].available)
+    if intel.scores:
+        if with_fundamentals == 0:
+            intel.notes.append(
+                "No holding has fundamentals cached, so valuation, growth and quality are not "
+                "scored and nothing can be judged expensive or cheap. Free filings cover "
+                "US-listed companies; European names depend on a best-effort source.")
+        elif with_fundamentals < len(intel.scores):
+            intel.notes.append(
+                f"{with_fundamentals} of {len(intel.scores)} holdings have fundamentals. The rest "
+                "are scored on price alone, so their overall scores are not comparable with the "
+                "others.")
     intel.notes.append("Ranks compare your holdings with each other, not with the wider market.")
     return intel

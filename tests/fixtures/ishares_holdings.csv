@@ -1,0 +1,11 @@
+iShares MSCI World UCITS ETF
+Fund Holdings as of,"30/Jun/2026"
+Inception Date,"25/Sep/2009"
+Shares Outstanding,"1,234,567"
+Stock,-
+
+Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,ISIN,Price,Location,Exchange,Currency
+AAPL,APPLE INC,Information Technology,Equity,"1,000,000.00",40.00,"1,000,000.00","5,000",US0378331005,200.00,United States,NASDAQ,USD
+ASML,ASML HOLDING NV,Information Technology,Equity,"500,000.00",20.00,"500,000.00","800",NL0010273215,625.00,Netherlands,Euronext Amsterdam,EUR
+NESN,NESTLE SA,Consumer Staples,Equity,"750,000.00",30.00,"750,000.00","7,500",CH0038863350,100.00,Switzerland,SIX,CHF
+XTSLA,BLK CSH FND TREASURY,Cash and/or Derivatives,Cash,"250,000.00",10.00,"250,000.00","250,000",-,1.00,United States,-,USD

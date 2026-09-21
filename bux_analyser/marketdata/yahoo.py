@@ -12,6 +12,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from .base import PriceSeries, Provenance, ProviderHealth, Quote, SecurityIds, SecurityMeta
+from .fundamentals import FY, Q, UNVERIFIED, FinancialPeriod, Fundamentals
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +124,22 @@ class YahooProvider:
             self.health.fail(e)
             return None
 
+    # Yahoo's statement row labels, in the order we prefer them.
+    _STATEMENT_ROWS = {
+        "revenue": ("Total Revenue", "Operating Revenue"),
+        "gross_profit": ("Gross Profit",),
+        "operating_income": ("Operating Income", "EBIT"),
+        "net_income": ("Net Income", "Net Income Common Stockholders"),
+        "eps_diluted": ("Diluted EPS",),
+        "operating_cash_flow": ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities"),
+        "capex": ("Capital Expenditure",),
+        "cash": ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"),
+        "total_debt": ("Total Debt",),
+        "total_equity": ("Stockholders Equity", "Total Equity Gross Minority Interest"),
+        "total_assets": ("Total Assets",),
+        "shares_diluted": ("Diluted Average Shares",),
+    }
+
     _QUOTE_TYPE_TO_ASSET = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "fund",
                             "INDEX": "benchmark", "CRYPTOCURRENCY": "crypto"}
 
@@ -153,6 +170,51 @@ class YahooProvider:
             self.health.fail(e)
             return None
 
+    def fundamentals(self, ids: SecurityIds) -> Fundamentals | None:
+        """Financial statements as Yahoo reports them.
+
+        Marked unverified: Yahoo publishes no filing date and no audit trail, so these
+        figures must never be used for a point-in-time backtest. They exist so European
+        holdings, which have no free authoritative feed, show something rather than
+        nothing.
+        """
+        import yfinance as yf
+        if not ids.ticker:
+            return None
+        self._throttle()
+        try:
+            t = yf.Ticker(ids.ticker)
+            periods: list[FinancialPeriod] = []
+            currency = None
+            try:
+                currency = (t.fast_info.currency or "").upper() or None
+            except Exception:
+                pass
+            for period_type, statements in ((FY, ("income_stmt", "balance_sheet", "cashflow")),
+                                            (Q, ("quarterly_income_stmt", "quarterly_balance_sheet",
+                                                 "quarterly_cashflow"))):
+                frames = []
+                for attr in statements:
+                    try:
+                        frames.append(getattr(t, attr))
+                    except Exception:
+                        frames.append(None)
+                periods += parse_yahoo_statements(frames, period_type, currency, self.source)
+            if not periods:
+                self.health.fail(f"no statements for {ids.ticker}")
+                return None
+            self.health.ok()
+            return Fundamentals(
+                isin=ids.isin, ticker=ids.ticker, currency=currency,
+                periods=sorted(periods, key=lambda p: (p.period_end, p.period_type)),
+                provenance=Provenance(self.name, self.source, Provenance.now(), date.today(),
+                                      UNVERIFIED, "no filing dates published"),
+                notes=["Yahoo does not publish filing dates, so these figures cannot be used "
+                       "for point-in-time analysis and may be stale or restated."])
+        except Exception as e:
+            self.health.fail(e)
+            return None
+
     def quote(self, ids: SecurityIds) -> Quote | None:
         import yfinance as yf
         if not ids.ticker:
@@ -175,3 +237,40 @@ class YahooProvider:
         except Exception as e:
             self.health.fail(e)
             return None
+
+
+def parse_yahoo_statements(frames, period_type: str, currency: str | None,
+                           source: str) -> list[FinancialPeriod]:
+    """Fold income, balance-sheet and cash-flow frames into periods.
+
+    Yahoo returns each statement as a DataFrame with metrics down the rows and period
+    end dates across the columns. Pure, so it can be tested without the network.
+    """
+    import pandas as pd
+    by_end: dict[date, FinancialPeriod] = {}
+    for frame in frames:
+        if frame is None or not hasattr(frame, "empty") or frame.empty:
+            continue
+        labels = {str(i).strip(): i for i in frame.index}
+        for column in frame.columns:
+            try:
+                end = pd.Timestamp(column).date()
+            except Exception:
+                continue
+            period = by_end.get(end)
+            if period is None:
+                period = by_end[end] = FinancialPeriod(
+                    period_end=end, period_type=period_type, as_reported_at=None,
+                    currency=currency, source=source, quality=UNVERIFIED)
+            for item, candidates in YahooProvider._STATEMENT_ROWS.items():
+                if item in period.values:
+                    continue
+                for label in candidates:
+                    if label not in labels:
+                        continue
+                    value = frame.loc[labels[label], column]
+                    if value is None or pd.isna(value):
+                        continue
+                    period.values[item] = float(value)
+                    break
+    return [p for p in by_end.values() if p.values]

@@ -12,8 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import BASE_CURRENCY
-from ..db import FxRate, PriceEod, QuoteCache, Security
+from ..db import EtfHolding, FundamentalsCache, FxRate, PriceEod, QuoteCache, Security
+import json
+
 from .base import FxProvider, PriceProvider, Provenance, SecurityIds, SecurityMeta
+from .fundamentals import Fundamentals, from_json, to_json
 
 log = logging.getLogger(__name__)
 
@@ -26,9 +29,13 @@ class MarketDataRouter:
     pluggable, so the router cannot assume they all handle their own failures.
     """
 
-    def __init__(self, price_providers: list[PriceProvider], fx_providers: list[FxProvider]):
+    def __init__(self, price_providers: list[PriceProvider], fx_providers: list[FxProvider],
+                 fundamental_providers: list | None = None):
         self.price_providers = price_providers
         self.fx_providers = fx_providers
+        # Tried before the price providers' own best-effort statements, so an official
+        # filing always beats a scraped one.
+        self.fundamental_providers = fundamental_providers or []
 
     @staticmethod
     def _call(provider, method: str, *args):
@@ -69,7 +76,7 @@ class MarketDataRouter:
 
     def health(self):
         seen = []
-        for p in self.price_providers + self.fx_providers:
+        for p in self.price_providers + self.fx_providers + self.fundamental_providers:
             h = getattr(p, "health", None)
             if h is not None and h not in seen:
                 seen.append(h)
@@ -141,6 +148,81 @@ class MarketDataStore:
             self.s.add(sec)
             self.s.commit()
         return self.price_history(benchmark.key, start, end)
+
+    # ---- fundamentals -----------------------------------------------------------
+    def ensure_fundamentals(self, isin: str, max_age_days: int = 7, force: bool = False):
+        """Fetch and cache company statements. Quarterly filings arrive at most a few
+        times a year, so a weekly refresh is generous."""
+        sec = self.s.get(Security, isin)
+        if sec is None or not sec.ticker or sec.asset_type in ("etf", "crypto", "benchmark"):
+            return None
+        for provider in list(self.router.fundamental_providers) + list(self.router.price_providers):
+            fn = getattr(provider, "fundamentals", None)
+            if fn is None:
+                continue
+            row = self.s.execute(select(FundamentalsCache).where(
+                FundamentalsCache.isin == isin, FundamentalsCache.provider == provider.name)).scalar()
+            fresh = row is not None and (datetime.now(timezone.utc)
+                                         - row.retrieved_at.replace(tzinfo=timezone.utc)) < timedelta(days=max_age_days)
+            if fresh and not force:
+                continue
+            data = self.router._call(provider, "fundamentals", SecurityIds(isin, sec.ticker, sec.currency))
+            if data is None or data.is_empty:
+                continue
+            payload = json.dumps(to_json(data))
+            quality = data.periods[-1].quality if data.periods else "reported"
+            latest = max((p.as_reported_at for p in data.periods if p.as_reported_at), default=None)
+            if row is None:
+                self.s.add(FundamentalsCache(isin=isin, provider=provider.name, payload=payload,
+                                             currency=data.currency, quality=quality,
+                                             latest_report=latest,
+                                             retrieved_at=datetime.now(timezone.utc)))
+            else:
+                row.payload, row.currency, row.quality = payload, data.currency, quality
+                row.latest_report, row.retrieved_at = latest, datetime.now(timezone.utc)
+            self.s.commit()
+        return self.get_fundamentals(isin)
+
+    def get_fundamentals(self, isin: str) -> Fundamentals | None:
+        """Read from cache only. Prefers an authoritative filing over a scraped one."""
+        rows = list(self.s.execute(select(FundamentalsCache).where(
+            FundamentalsCache.isin == isin)).scalars())
+        if not rows:
+            return None
+        rows.sort(key=lambda r: (r.quality != "reported", -(r.latest_report or date.min).toordinal()))
+        return from_json(json.loads(rows[0].payload))
+
+    # ---- ETF constituents ---------------------------------------------------------
+    def ensure_etf_holdings(self, isin: str, provider, max_age_days: int = 30, force: bool = False):
+        latest = self.s.execute(select(EtfHolding.as_of).where(EtfHolding.etf_isin == isin)
+                                .order_by(EtfHolding.as_of.desc()).limit(1)).scalar()
+        if latest is not None and not force and (date.today() - latest).days < max_age_days:
+            return self.get_etf_holdings(isin)
+        file = self.router._call(provider, "holdings", isin)
+        if file is None:
+            self.warnings.append(f"No holdings file available for {isin}; the fund stays "
+                                 "unbroken in exposure charts.")
+            return self.get_etf_holdings(isin)
+        self.s.query(EtfHolding).filter_by(etf_isin=isin, as_of=file.as_of).delete()
+        now = datetime.now(timezone.utc)
+        for c in file.constituents:
+            self.s.add(EtfHolding(etf_isin=isin, as_of=file.as_of, constituent=c.identifier,
+                                  name=c.name, weight=Decimal(str(c.weight)), sector=c.sector,
+                                  country=c.country, currency=c.currency,
+                                  asset_class=c.asset_class, source=file.source, retrieved_at=now))
+        self.s.commit()
+        return self.get_etf_holdings(isin)
+
+    def get_etf_holdings(self, isin: str):
+        latest = self.s.execute(select(EtfHolding.as_of).where(EtfHolding.etf_isin == isin)
+                                .order_by(EtfHolding.as_of.desc()).limit(1)).scalar()
+        if latest is None:
+            return None
+        rows = self.s.execute(select(EtfHolding).where(EtfHolding.etf_isin == isin,
+                                                       EtfHolding.as_of == latest)).scalars()
+        return pd.DataFrame([{"constituent": r.constituent, "name": r.name,
+                              "weight": float(r.weight), "sector": r.sector, "country": r.country,
+                              "currency": r.currency, "asset_class": r.asset_class} for r in rows])
 
     def set_manual_ticker(self, isin: str, ticker: str) -> None:
         sec = self.s.get(Security, isin)

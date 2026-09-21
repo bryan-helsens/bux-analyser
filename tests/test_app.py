@@ -63,7 +63,8 @@ def _run(timeout=120):
 def test_dashboard_renders_every_tab_with_market_data(app_db):
     at = _run()
     assert [t.label for t in at.tabs] == ["Overview", "Performance", "Exposure", "Risk",
-                                          "Signals", "Scenarios", "Holdings", "Transactions"]
+                                          "Signals", "Scenarios", "Holdings", "Research",
+                                          "Transactions"]
     labels = {m.label: m.value for m in at.metric}
     assert labels["Cash"] == "€ 844.02"
     assert labels["Total value"].startswith("€") and labels["Total value"] != "n/a"
@@ -111,6 +112,9 @@ def test_signals_and_scenarios_populate_for_a_rankable_portfolio(tmp_path, monke
     assert "not a forecast" in captions
     assert "would have done" in captions          # the what-if table states its limits
     assert any("fundamentals" in i.value for i in at.info)
+    # the Research tab answers a question without any model involved
+    captions = " ".join(c.value for c in at.caption)
+    assert "not by a language model" in captions
 
 
 def test_dashboard_without_market_data_says_so_instead_of_failing(tmp_path, monkeypatch):

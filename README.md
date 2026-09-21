@@ -19,6 +19,9 @@ exposure breakdowns, risk analytics and a tabbed dashboard.
 **Phase 3 — portfolio intelligence (done, pending live verification).** Scores,
 recommendations, alerts, Monte Carlo, stress tests and allocation what-ifs.
 
+**Phase 4 — advanced intelligence (done, pending live verification).** Company
+fundamentals, ETF look-through, factor analysis, backtesting and a question layer.
+
 ### What it does
 
 - **Import** — BUX transaction-history CSV: paired trade legs, fees, transaction taxes,
@@ -55,8 +58,25 @@ recommendations, alerts, Monte Carlo, stress tests and allocation what-ifs.
   portfolio actually lived through, and equal-weight, minimum-variance and equal-risk
   alternatives compared on the history you hold.
 
-Not built yet: company fundamentals, ETF look-through, factor regression, backtesting,
-news and the local AI assistant.
+- **Fundamentals** — official filings from SEC EDGAR, which publish the date each figure
+  was filed, plus a best-effort source for European names that is labelled unverified and
+  barred from point-in-time work. Valuation, growth and quality pillars score once
+  statements exist; holdings without them stay unscored rather than assumed average.
+- **ETF look-through** — issuer holdings files parsed by column meaning, so a fund is
+  dissolved into what it actually holds. A fund whose file we lack, or whose file covers
+  too little of it, keeps its own bucket instead of being guessed at.
+- **Factor analysis** — the portfolio's returns regressed on market, size, value,
+  profitability, investment and momentum, with a t-statistic per loading so a real tilt
+  can be told from noise.
+- **Backtesting** — walk-forward, with look-ahead prevented structurally: a rule is a
+  function handed only the history up to its rebalance date. Costs charged on every
+  trade, buy-and-hold alongside, and a permutation test that reruns the rule on shuffled
+  signals to show what luck produces on the same data. Every result ships with the biases
+  it cannot correct.
+- **Question layer** — named functions over the database that answer in plain language,
+  computed in Python. No language model is installed or called.
+
+Not built yet: news, European filings via ESEF, and a local language model.
 
 ### What it deliberately will not do
 
@@ -66,6 +86,8 @@ news and the local AI assistant.
 - Let a language model choose a score or a label.
 - Claim a backtest it has not run: the recommendation rules are untested against outcomes,
   and the dashboard says that where they appear.
+- Let a scraped figure masquerade as a filing, or use one in a point-in-time backtest.
+- Read a backtest result without its biases attached.
 
 ### Run locally
 
@@ -103,7 +125,9 @@ bux_analyser/
   importers/   BUX CSV parsing and idempotent persistence
   core/        transaction model, ledger, valuation, TWR, XIRR
   marketdata/  provider abstraction, Yahoo prices, ECB rates, cache-first store
-  analytics/   returns, risk, indicators, portfolio assembly, scoring, simulation
+  analytics/   returns, risk, indicators, portfolio assembly, scoring, simulation,
+               fundamentals, factors, backtest
+  ai/          the function catalogue an assistant may call
   alerts.py    rule evaluation and the event inbox
   intelligence.py  scores, recommendations and alerts for a snapshot
   ui/          chart palette and builders
