@@ -6,7 +6,8 @@ import pytest
 
 from bux_analyser.db import make_engine, session_factory
 from bux_analyser.importers.persist import import_bux_file
-from bux_analyser.marketdata.base import FxSeries, PriceSeries, Provenance, Quote, SecurityIds
+from bux_analyser.marketdata.base import (FxSeries, PriceSeries, Provenance, Quote, SecurityIds,
+                                          SecurityMeta)
 from bux_analyser.marketdata.store import MarketDataRouter, MarketDataStore
 from bux_analyser.service import build_snapshot, refresh_market_data
 
@@ -21,13 +22,27 @@ class Prices:
         return SecurityIds(isin, isin[:4], self.levels[isin][1]) if isin in self.levels else None
 
     def eod_history(self, ids, start, end):
+        if ids.isin not in self.levels:
+            return None                       # unknown symbol, e.g. a benchmark
         lvl, ccy = self.levels[ids.isin]
         idx = pd.date_range(start, end, freq="D")
         return PriceSeries(pd.Series(lvl, index=idx), ccy, Provenance("stub", "Stub", Provenance.now(), end))
 
     def quote(self, ids):
+        if ids.isin not in self.levels:
+            return None
         lvl, ccy = self.levels[ids.isin]
         return Quote(lvl, ccy, Provenance("stub", "Stub", Provenance.now(), date.today()), previous_close=lvl / 1.1)
+
+    profiles = {"US0000000001": ("stock", "Technology", "United States"),
+                "NL0000000002": ("etf", None, None)}
+
+    def metadata(self, ids):
+        if ids.isin not in self.profiles:
+            return None
+        kind, sector, country = self.profiles[ids.isin]
+        return SecurityMeta(asset_type=kind, sector=sector, country=country, market_cap=1e9,
+                            provenance=Provenance("stub", "Stub", Provenance.now(), date.today()))
 
 
 class Fx:
@@ -42,7 +57,9 @@ def test_snapshot_values_and_provenance(tmp_path):
     s = session_factory(make_engine(tmp_path / "t.db"))()
     import_bux_file(s, FIX, archive=False)
     store = MarketDataStore(s, MarketDataRouter([Prices()], [Fx()]))
-    assert refresh_market_data(s, store) == []
+    # Warnings are expected: the stub has no benchmark series and no profile for every name.
+    warnings = refresh_market_data(s, store)
+    assert all(("profile data" in w) or ("BM:" in w) for w in warnings), warnings
     snap = build_snapshot(s, store)
     # only Acme is open: 1 share × 120 USD × 0.5 EUR/USD = 60 EUR ; cash 844.02
     assert len(snap.holdings) == 1

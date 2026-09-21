@@ -86,3 +86,36 @@ def test_fx_identity_and_cached(tmp_path):
     assert (eur == 1.0).all() and prov.kind == "calculated"
     usd, prov = store.fx_history("USD", date.today() - timedelta(days=5))
     assert (usd == 0.9).all() and prov.provider == "stubfx"
+
+
+class Exploding:
+    """A provider that raises on every call, as a badly behaved plugin would."""
+    name, cost = "boom", "free"
+
+    def __init__(self):
+        from bux_analyser.marketdata.base import ProviderHealth
+        self.health = ProviderHealth(self.name)
+
+    def resolve(self, *a, **k): raise RuntimeError("resolve exploded")
+    def eod_history(self, *a, **k): raise RuntimeError("history exploded")
+    def quote(self, *a, **k): raise RuntimeError("quote exploded")
+    def metadata(self, *a, **k): raise RuntimeError("metadata exploded")
+
+
+def test_router_survives_a_raising_provider_and_falls_through(tmp_path):
+    eng = make_engine(tmp_path / "t.db")
+    good, bad = StubPrices(), Exploding()
+    store = MarketDataStore(session_factory(eng)(), MarketDataRouter([bad, good], [StubFx()]))
+    sec = store.ensure_resolved("NL0000000001", "Stub", "EUR")
+    assert sec.ticker == "STUB.AS"                    # fell through to the working provider
+    assert bad.health.failures >= 1 and "exploded" in bad.health.last_error
+    s, prov = store.price_history("NL0000000001", date.today() - timedelta(days=10))
+    assert not s.empty and prov.provider == "stub"
+
+
+def test_router_returns_nothing_when_every_provider_fails(tmp_path):
+    eng = make_engine(tmp_path / "t.db")
+    bad = Exploding()
+    store = MarketDataStore(session_factory(eng)(), MarketDataRouter([bad], [StubFx()]))
+    assert store.ensure_resolved("NL0000000001", "Stub", "EUR").ticker is None
+    assert any("Could not resolve" in w for w in store.warnings)

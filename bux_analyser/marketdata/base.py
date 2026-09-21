@@ -52,6 +52,19 @@ class PriceSeries:
 
 
 @dataclass
+class SecurityMeta:
+    """Descriptive data about a security. Every field may be None: no free source
+    covers everything, and the dashboard shows gaps rather than guesses."""
+    asset_type: str | None = None      # stock / etf / crypto / unknown
+    sector: str | None = None
+    industry: str | None = None
+    country: str | None = None
+    market_cap: float | None = None
+    long_name: str | None = None
+    provenance: Provenance | None = None
+
+
+@dataclass
 class FxSeries:
     series: pd.Series          # base per 1 unit of `currency`
     currency: str
@@ -71,6 +84,7 @@ class PriceProvider(Protocol):
     def resolve(self, isin: str, hint_name: str | None = None, hint_currency: str | None = None) -> SecurityIds | None: ...
     def eod_history(self, ids: SecurityIds, start: date, end: date) -> PriceSeries | None: ...
     def quote(self, ids: SecurityIds) -> Quote | None: ...
+    def metadata(self, ids: SecurityIds) -> "SecurityMeta | None": ...
 
 
 @runtime_checkable

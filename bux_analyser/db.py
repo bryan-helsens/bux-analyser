@@ -60,7 +60,13 @@ class Security(Base):
     ticker_provider: Mapped[str | None] = mapped_column(String)
     ticker_manual: Mapped[bool] = mapped_column(Boolean, default=False)  # user override wins
     exchange: Mapped[str | None] = mapped_column(String)
-    asset_type: Mapped[str | None] = mapped_column(String)     # stock / etf / unknown
+    asset_type: Mapped[str | None] = mapped_column(String)     # stock / etf / crypto / benchmark
+    sector: Mapped[str | None] = mapped_column(String)
+    industry: Mapped[str | None] = mapped_column(String)
+    country: Mapped[str | None] = mapped_column(String)
+    market_cap: Mapped[Decimal | None] = mapped_column(Money)
+    meta_provider: Mapped[str | None] = mapped_column(String)
+    meta_retrieved_at: Mapped[datetime | None] = mapped_column(DateTime)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
@@ -131,7 +137,29 @@ def make_engine(path=None):
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(eng)
+    _add_missing_columns(eng)
     return eng
+
+
+def _add_missing_columns(engine) -> None:
+    """Add columns introduced after a database was created.
+
+    The personal database holds imported transactions that would be tedious to rebuild,
+    so new nullable columns are added in place rather than requiring a fresh import.
+    Anything more involved than adding a column needs a real migration.
+    """
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have or not col.nullable:
+                    continue
+                ddl = col.type.compile(engine.dialect)
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl}'))
 
 
 def session_factory(engine=None) -> sessionmaker[Session]:

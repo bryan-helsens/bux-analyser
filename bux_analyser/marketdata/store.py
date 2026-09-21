@@ -13,48 +13,67 @@ from sqlalchemy.orm import Session
 
 from ..config import BASE_CURRENCY
 from ..db import FxRate, PriceEod, QuoteCache, Security
-from .base import FxProvider, PriceProvider, Provenance, SecurityIds
+from .base import FxProvider, PriceProvider, Provenance, SecurityIds, SecurityMeta
 
 log = logging.getLogger(__name__)
 
 
 class MarketDataRouter:
-    """Ordered providers per capability; first success wins."""
+    """Ordered providers per capability; the first usable answer wins.
+
+    A provider that raises is treated exactly like one that returns nothing: the error
+    is recorded against its health and the next provider is tried. Providers are
+    pluggable, so the router cannot assume they all handle their own failures.
+    """
 
     def __init__(self, price_providers: list[PriceProvider], fx_providers: list[FxProvider]):
         self.price_providers = price_providers
         self.fx_providers = fx_providers
 
-    def resolve(self, isin, hint_name=None, hint_currency=None):
-        for p in self.price_providers:
-            ids = p.resolve(isin, hint_name, hint_currency)
-            if ids:
-                return p.name, ids
+    @staticmethod
+    def _call(provider, method: str, *args):
+        fn = getattr(provider, method, None)
+        if fn is None:
+            return None
+        try:
+            return fn(*args)
+        except Exception as e:                       # noqa: BLE001 - deliberately broad
+            health = getattr(provider, "health", None)
+            if health is not None:
+                health.fail(e)
+            log.warning("provider %s.%s failed: %s", getattr(provider, "name", provider), method, e)
+            return None
+
+    def _first(self, providers, method: str, *args):
+        for p in providers:
+            result = self._call(p, method, *args)
+            if result is not None:
+                return p, result
         return None, None
 
+    def resolve(self, isin, hint_name=None, hint_currency=None):
+        p, ids = self._first(self.price_providers, "resolve", isin, hint_name, hint_currency)
+        return (p.name if p else None), ids
+
     def eod_history(self, ids, start, end):
-        for p in self.price_providers:
-            ps = p.eod_history(ids, start, end)
-            if ps is not None:
-                return ps
-        return None
+        return self._first(self.price_providers, "eod_history", ids, start, end)[1]
 
     def quote(self, ids):
-        for p in self.price_providers:
-            q = p.quote(ids)
-            if q is not None:
-                return q
-        return None
+        return self._first(self.price_providers, "quote", ids)[1]
+
+    def metadata(self, ids):
+        return self._first(self.price_providers, "metadata", ids)[1]
 
     def fx_history(self, currency, base, start, end):
-        for p in self.fx_providers:
-            s = p.fx_history(currency, base, start, end)
-            if s is not None:
-                return s
-        return None
+        return self._first(self.fx_providers, "fx_history", currency, base, start, end)[1]
 
     def health(self):
-        return [getattr(p, "health", None) for p in self.price_providers + self.fx_providers if getattr(p, "health", None)]
+        seen = []
+        for p in self.price_providers + self.fx_providers:
+            h = getattr(p, "health", None)
+            if h is not None and h not in seen:
+                seen.append(h)
+        return seen
 
 
 class MarketDataStore:
@@ -85,6 +104,43 @@ class MarketDataStore:
             self.warnings.append(f"Could not resolve a market symbol for {isin} ({name}); set it manually.")
         self.s.commit()
         return sec
+
+    def ensure_metadata(self, isin: str, max_age_days: int = 30, force: bool = False) -> Security | None:
+        """Fetch sector/industry/country once a month. Missing fields stay missing."""
+        sec = self.s.get(Security, isin)
+        if sec is None or not sec.ticker:
+            return sec
+        fresh = sec.meta_retrieved_at is not None and (
+            datetime.now(timezone.utc) - sec.meta_retrieved_at.replace(tzinfo=timezone.utc)
+        ) < timedelta(days=max_age_days)
+        if fresh and not force:
+            return sec
+        m = self.router.metadata(SecurityIds(isin, sec.ticker, sec.currency))
+        if m is None:
+            self.warnings.append(f"No profile data available for {sec.name or isin}.")
+            return sec
+        sec.sector = m.sector or sec.sector
+        sec.industry = m.industry or sec.industry
+        sec.country = m.country or sec.country
+        sec.market_cap = Decimal(str(m.market_cap)) if m.market_cap else sec.market_cap
+        if m.asset_type and sec.asset_type in (None, "security", "unknown"):
+            sec.asset_type = m.asset_type
+        sec.meta_provider = m.provenance.provider if m.provenance else None
+        sec.meta_retrieved_at = datetime.now(timezone.utc)
+        self.s.commit()
+        return sec
+
+    def ensure_benchmark(self, benchmark, start: date, end: date | None = None):
+        """Benchmarks are ordinary securities under a reserved key, so they reuse the
+        same cache, provenance and degradation behaviour as holdings."""
+        sec = self.s.get(Security, benchmark.key)
+        if sec is None:
+            sec = Security(isin=benchmark.key, name=benchmark.label, ticker=benchmark.ticker,
+                           ticker_provider="config", ticker_manual=True, asset_type="benchmark",
+                           currency="EUR")
+            self.s.add(sec)
+            self.s.commit()
+        return self.price_history(benchmark.key, start, end)
 
     def set_manual_ticker(self, isin: str, ticker: str) -> None:
         sec = self.s.get(Security, isin)

@@ -10,7 +10,9 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import BASE_CURRENCY
+from .analytics.portfolio import Analytics, build as build_analytics
+from .analytics.returns import Decomposition
+from .config import BASE_CURRENCY, BENCHMARKS, Benchmark
 from .core.ledger import build_ledger
 from .core.performance import portfolio_xirr, time_weighted_return, valuation_history
 from .core.types import Ledger, Txn
@@ -35,6 +37,7 @@ class Holding:
     avg_cost_local: Decimal
     avg_cost_base: Decimal
     cost_base: Decimal
+    cost_local: Decimal
     price: float | None      # latest price in price_currency
     price_currency: str | None
     price_provenance: Provenance | None
@@ -51,6 +54,11 @@ class Holding:
     realized_pl_base: Decimal
     weight: float | None = None
     ticker: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    country: str | None = None
+    asset_type: str | None = None
+    decomposition: Decomposition | None = None
     issues: list[str] = field(default_factory=list)
 
 
@@ -69,6 +77,7 @@ class Snapshot:
     unrealized: float | None
     mwr: float | None
     warnings: list[str]
+    analytics: Analytics | None = None
 
 
 def refresh_market_data(session: Session, store: MarketDataStore, txns: list[Txn] | None = None) -> list[str]:
@@ -96,6 +105,12 @@ def refresh_market_data(session: Session, store: MarketDataStore, txns: list[Txn
     for ccy in currencies | {p.currency for p in ledger.positions.values() if p.currency}:
         if ccy and ccy != BASE_CURRENCY:
             store.fx_history(ccy, first)
+    for isin, p in ledger.open_positions.items():
+        sec = session.get(Security, isin)
+        if sec is not None and sec.ticker and sec.asset_type != "crypto":
+            store.ensure_metadata(isin)
+    for bm in BENCHMARKS:
+        store.ensure_benchmark(bm, first)
     session.commit()
     return list(store.warnings)
 
@@ -169,11 +184,15 @@ def build_snapshot(session: Session, store: MarketDataStore, refresh: bool = Fal
             issues.append(f"priced in {pccy}, traded in {sec.currency} (converted with ECB rate)")
         holdings.append(Holding(isin=isin, name=p.name or (sec.name if sec else isin), currency=p.currency,
                                 quantity=p.quantity, avg_cost_local=p.avg_cost_local, avg_cost_base=p.avg_cost_base,
-                                cost_base=p.cost_base, price=price, price_currency=pccy, price_provenance=prov,
+                                cost_base=p.cost_base, cost_local=p.cost_local,
+                                price=price, price_currency=pccy, price_provenance=prov,
                                 fx=rate, fx_provenance=rprov, value_base=value, unrealized_base=unreal,
                                 unrealized_pct=unreal_pct, day_change_base=dchg, day_change_pct=dchg_pct,
                                 dividends_base=p.dividends_base, fees_base=p.fees_base, taxes_base=p.taxes_base,
-                                realized_pl_base=p.realized_pl_base, ticker=(sec.ticker if sec else None), issues=issues))
+                                realized_pl_base=p.realized_pl_base, ticker=(sec.ticker if sec else None),
+                                sector=(sec.sector if sec else None), industry=(sec.industry if sec else None),
+                                country=(sec.country if sec else None),
+                                asset_type=(sec.asset_type if sec else None), issues=issues))
 
     sec_value = sum(h.value_base for h in holdings if h.value_base is not None) if holdings else 0.0
     missing = [h for h in holdings if h.value_base is None]
@@ -194,7 +213,27 @@ def build_snapshot(session: Session, store: MarketDataStore, refresh: bool = Fal
         nm = ledger.positions[isin].name or isin
         warnings.append(f"{nm}: no market data; valued at cost in the history from {d0} to {d1}.")
     twr = time_weighted_return(history["total"], history["external_flow"]) if not history.empty else pd.Series(dtype=float)
+    meta = {}
+    for h in holdings:
+        sec = session.get(Security, h.isin)
+        meta[h.isin] = {"currency": h.price_currency or h.currency, "sector": h.sector,
+                        "country": h.country, "industry": h.industry,
+                        "asset_type": (sec.asset_type if sec else None)}
+
+    bench = []
+    for bm in BENCHMARKS:
+        series, _ = store.price_history(bm.key, first, refresh=False)
+        if series is not None and not series.empty:
+            bench.append((bm.label, series, bm.total_return, bm.note))
+    if not bench:
+        warnings.append("No benchmark history cached yet. Run a refresh to enable comparisons.")
+
+    analytics = build_analytics(holdings=holdings, prices=prices, fx=fx, currency_of=price_ccy,
+                                meta=meta, twr_index=twr, history_index=history.index if not history.empty else None,
+                                benchmark_series=bench, base=BASE_CURRENCY)
+    warnings += analytics.notes
+
     return Snapshot(as_of=datetime.now(timezone.utc), ledger=ledger, holdings=holdings, history=history, twr=twr,
                     total_value=total, securities_value=(None if missing else sec_value), cash=cash,
                     day_change=day_change, day_change_pct=day_change_pct, unrealized=unreal_total,
-                    mwr=portfolio_xirr(history), warnings=warnings)
+                    mwr=portfolio_xirr(history), warnings=warnings, analytics=analytics)

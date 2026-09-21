@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from .base import PriceSeries, Provenance, ProviderHealth, Quote, SecurityIds
+from .base import PriceSeries, Provenance, ProviderHealth, Quote, SecurityIds, SecurityMeta
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +119,36 @@ class YahooProvider:
             return PriceSeries(series=s, currency=ccy,
                                provenance=Provenance(self.name, self.source, Provenance.now(),
                                                      s.index[-1].date(), "reported"))
+        except Exception as e:
+            self.health.fail(e)
+            return None
+
+    _QUOTE_TYPE_TO_ASSET = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "fund",
+                            "INDEX": "benchmark", "CRYPTOCURRENCY": "crypto"}
+
+    def metadata(self, ids: SecurityIds) -> SecurityMeta | None:
+        """Sector, industry, country and size. Yahoo leaves most of these empty for
+        ETFs and for many European listings, which the caller must tolerate."""
+        import yfinance as yf
+        if not ids.ticker:
+            return None
+        self._throttle()
+        try:
+            info = yf.Ticker(ids.ticker).info or {}
+            if not info:
+                self.health.fail(f"no info for {ids.ticker}")
+                return None
+            self.health.ok()
+            cap = info.get("marketCap") or info.get("totalAssets")
+            return SecurityMeta(
+                asset_type=self._QUOTE_TYPE_TO_ASSET.get((info.get("quoteType") or "").upper()),
+                sector=info.get("sector") or info.get("category"),
+                industry=info.get("industry"),
+                country=info.get("country"),
+                market_cap=float(cap) if cap else None,
+                long_name=info.get("longName") or info.get("shortName"),
+                provenance=Provenance(self.name, self.source, Provenance.now(), date.today(),
+                                      "reported", "company profile"))
         except Exception as e:
             self.health.fail(e)
             return None
