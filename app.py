@@ -17,6 +17,8 @@ from bux_analyser import alerts as alert_engine
 from bux_analyser import intelligence as intel_engine
 from bux_analyser.analytics import simulate as sim
 from bux_analyser.analytics.portfolio import ETF_BUCKET
+from bux_analyser.ai.briefing import QUESTIONS, BriefingOptions
+from bux_analyser.ai import briefing as briefing_module
 from bux_analyser.ai.tools import PortfolioTools
 from bux_analyser.analytics import backtest as bt
 from bux_analyser.analytics import factors as fa
@@ -725,36 +727,84 @@ with tabs[7]:
                     st.caption(n)
 
     st.divider()
-    st.subheader("Ask about the portfolio")
+    st.subheader("Ask a capable model")
+    st.caption("This builds a factual briefing from your own data and wraps it in rules that "
+               "stop a model inventing numbers. Nothing is sent from here: you copy it and "
+               "paste it into whichever chat you trust.")
+
     tools = PortfolioTools(snapshot, intel)
     holding_names = [h.name for h in snapshot.holdings]
-    questions = {
-        "How is the portfolio doing?": ("get_portfolio_summary", {}),
-        "How am I doing against the market?": ("get_performance", {}),
-        "What are my biggest risks?": ("get_risk_metrics", {}),
-        "Which holdings carry the most risk?": ("get_risk_contributors", {}),
-        "Am I overexposed to one sector?": ("get_allocation", {"dimension": "sector"}),
-        "What is my currency exposure?": ("get_allocation", {"dimension": "currency"}),
-        "What has crossed an alert?": ("get_alerts", {}),
-        "Tell me about one holding": ("get_position", {"query": None}),
-        "Why does a holding have its signal?": ("get_recommendation_reasons", {"query": None}),
-        "What do the financials say?": ("get_fundamentals", {"query": None}),
-    }
-    chosen = st.selectbox("Question", list(questions))
-    function, kwargs = questions[chosen]
-    kwargs = dict(kwargs)
-    if "query" in kwargs and holding_names:
-        kwargs["query"] = st.selectbox("Holding", holding_names, key="ask_holding")
-    answer = tools.call(function, **kwargs)
-    st.markdown(f"**{answer.summary}**")
-    if answer.table is not None and not answer.table.empty:
-        st.dataframe(answer.table, width="stretch")
-    for caveat in answer.caveats:
-        st.caption(f"Note: {caveat}")
-    if answer.sources:
-        st.caption("Based on: " + "; ".join(answer.sources))
-    st.caption("These answers are produced by the application's own calculations, not by a "
-               "language model. Every figure comes from your data.")
+
+    c = st.columns([2, 1])
+    with c[0]:
+        preset = st.selectbox("Question", list(QUESTIONS) + ["Write my own"])
+        question = (st.text_area("Your question", height=90) if preset == "Write my own"
+                    else st.text_area("Question", QUESTIONS[preset], height=90))
+    with c[1]:
+        include_amounts = st.toggle(
+            "Include euro amounts", value=False,
+            help="Off by default. The briefing still carries every weight, return and ratio, "
+                 "so the analysis is unaffected; only the size of your portfolio is withheld.")
+        st.markdown("**Sections**")
+        want = {key: st.checkbox(label, value=default, key=f"sec_{key}") for key, label, default in [
+            ("holdings", "Holdings", True), ("performance", "Performance", True),
+            ("risk", "Risk", True), ("exposure", "Exposure", True),
+            ("scores", "Scores and signals", True), ("fundamentals", "Fundamentals", True),
+            ("alerts", "Alerts", True)]}
+
+    options = BriefingOptions(
+        include_amounts=include_amounts, question=question,
+        include_holdings=want["holdings"], include_performance=want["performance"],
+        include_risk=want["risk"], include_exposure=want["exposure"],
+        include_scores=want["scores"], include_fundamentals=want["fundamentals"],
+        include_alerts=want["alerts"])
+    brief = briefing_module.build(snapshot, intel, options)
+
+    m = st.columns(3)
+    m[0].metric("Length", f"{brief.characters:,} characters")
+    m[1].metric("Roughly", f"{brief.approx_tokens:,} tokens")
+    m[2].metric("Amounts", "withheld" if brief.redacted else "included")
+    if brief.redacted:
+        st.success("Euro amounts are withheld. The briefing describes the shape of your "
+                   "portfolio, not its size.")
+    else:
+        st.warning("This briefing contains your actual euro amounts. Only paste it somewhere "
+                   "you are comfortable having them.")
+
+    st.download_button("Download the briefing", brief.markdown,
+                       file_name=f"portfolio-briefing-{snapshot.as_of:%Y-%m-%d}.md",
+                       mime="text/markdown", width="stretch", type="primary")
+    st.caption("Select the box below and copy, or use the download button.")
+    st.code(brief.markdown, language="markdown")
+
+    with st.expander("Answers without any model at all"):
+        st.caption("These are computed by the application itself, so they are correct by "
+                   "construction. Use them to check anything a model tells you.")
+        direct = {
+            "How is the portfolio doing?": ("get_portfolio_summary", {}),
+            "How am I doing against the market?": ("get_performance", {}),
+            "What are my biggest risks?": ("get_risk_metrics", {}),
+            "Which holdings carry the most risk?": ("get_risk_contributors", {}),
+            "What is my sector exposure?": ("get_allocation", {"dimension": "sector"}),
+            "What is my currency exposure?": ("get_allocation", {"dimension": "currency"}),
+            "What has crossed an alert?": ("get_alerts", {}),
+            "Tell me about one holding": ("get_position", {"query": None}),
+            "Why does a holding have its signal?": ("get_recommendation_reasons", {"query": None}),
+            "What do the financials say?": ("get_fundamentals", {"query": None}),
+        }
+        chosen = st.selectbox("Question", list(direct), key="direct_q")
+        function, kwargs = direct[chosen]
+        kwargs = dict(kwargs)
+        if "query" in kwargs and holding_names:
+            kwargs["query"] = st.selectbox("Holding", holding_names, key="ask_holding")
+        answer = tools.call(function, **kwargs)
+        st.markdown(f"**{answer.summary}**")
+        if answer.table is not None and not answer.table.empty:
+            st.dataframe(answer.table, width="stretch")
+        for caveat in answer.caveats:
+            st.caption(f"Note: {caveat}")
+        if answer.sources:
+            st.caption("Based on: " + "; ".join(answer.sources))
 
 # ---------------------------------------------------------------- Transactions
 with tabs[8]:

@@ -74,9 +74,23 @@ fundamentals, ETF look-through, factor analysis, backtesting and a question laye
   signals to show what luck produces on the same data. Every result ships with the biases
   it cannot correct.
 - **Question layer** — named functions over the database that answer in plain language,
-  computed in Python. No language model is installed or called.
+  computed in Python, so they are correct by construction and need no model at all.
+- **Briefing export** — assembles everything above into one markdown document wrapped in
+  rules that forbid a model from calculating, estimating or recalling any number, and a
+  section naming every real gap so a model cannot quietly fill one. Euro amounts are
+  withheld by default: the briefing carries every weight, return and ratio, so the
+  analysis is unaffected while the portfolio's size stays private. You copy it into
+  whichever chat you trust; nothing is sent from the application.
 
-Not built yet: news, European filings via ESEF, and a local language model.
+Not built yet: news, and European filings via ESEF.
+
+### Why there is no built-in chatbot
+
+A model small enough to run locally on an ordinary machine is not good enough for this
+work, and wiring the application to a cloud model would mean paying a subscription and
+sending the portfolio automatically. The briefing export gets a strong model's judgement
+with neither cost: you choose the model, you see exactly what you are sharing, and the
+arithmetic has already been done by code that is tested.
 
 ### What it deliberately will not do
 
@@ -127,7 +141,7 @@ bux_analyser/
   marketdata/  provider abstraction, Yahoo prices, ECB rates, cache-first store
   analytics/   returns, risk, indicators, portfolio assembly, scoring, simulation,
                fundamentals, factors, backtest
-  ai/          the function catalogue an assistant may call
+  ai/          the function catalogue an assistant may call, and the briefing export
   alerts.py    rule evaluation and the event inbox
   intelligence.py  scores, recommendations and alerts for a snapshot
   ui/          chart palette and builders

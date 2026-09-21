@@ -114,7 +114,31 @@ def test_signals_and_scenarios_populate_for_a_rankable_portfolio(tmp_path, monke
     assert any("fundamentals" in i.value for i in at.info)
     # the Research tab answers a question without any model involved
     captions = " ".join(c.value for c in at.caption)
-    assert "not by a language model" in captions
+    assert "Nothing is sent from here" in captions
+
+
+def test_the_briefing_withholds_amounts_until_asked(tmp_path, monkeypatch):
+    """The export is the only thing that leaves the machine, so its default must be safe."""
+    from tests.test_intelligence import MultiPrices
+    path = tmp_path / "brief.db"
+    monkeypatch.setattr(db_module, "DB_PATH", path)
+    session = session_factory(make_engine(path))()
+    import_bux_file(session, Path(__file__).parent / "fixtures" / "bux_multi.csv", archive=False)
+    store = MarketDataStore(session, MarketDataRouter([MultiPrices()], [Fx()]))
+    refresh_market_data(session, store)
+    session.commit()
+    import streamlit as st
+    st.cache_resource.clear()
+
+    at = _run()
+    labels = {m.label: m.value for m in at.metric}
+    assert labels["Amounts"] == "withheld"
+    assert any("shape of your" in s.value for s in at.success)
+    blocks = [c.value for c in at.code]
+    assert any("# Portfolio briefing" in b for b in blocks)
+    briefing = next(b for b in blocks if "# Portfolio briefing" in b)
+    assert "Do not calculate, estimate, or recall any" in briefing
+    assert "What this briefing cannot tell you" in briefing
 
 
 def test_dashboard_without_market_data_says_so_instead_of_failing(tmp_path, monkeypatch):
