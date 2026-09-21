@@ -11,7 +11,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import numpy as np
+
+from bux_analyser import alerts as alert_engine
+from bux_analyser import intelligence as intel_engine
+from bux_analyser.analytics import simulate as sim
 from bux_analyser.analytics.portfolio import ETF_BUCKET
+from bux_analyser.analytics.scoring import PILLAR_DEFINITIONS, Thresholds, unavailable_labels
 from bux_analyser.db import make_engine, session_factory
 from bux_analyser.importers.persist import import_bux_file
 from bux_analyser.service import build_snapshot, default_store, refresh_market_data
@@ -124,7 +130,8 @@ k[5].metric("Cash", eur(snapshot.cash), help="Reconciled against the BUX running
 for w in snapshot.warnings:
     st.warning(w)
 
-tabs = st.tabs(["Overview", "Performance", "Exposure", "Risk", "Holdings", "Transactions"])
+tabs = st.tabs(["Overview", "Performance", "Exposure", "Risk", "Signals", "Scenarios",
+                "Holdings", "Transactions"])
 
 # ---------------------------------------------------------------- holdings frame
 rows = []
@@ -305,8 +312,221 @@ with tabs[3]:
         st.plotly_chart(charts.correlation_heatmap(an.correlation, theme), width="stretch", key="corr")
         st.caption("Daily euro returns. Two holdings close to 1.0 diversify each other very little.")
 
-# ---------------------------------------------------------------- Holdings
+
+# ---------------------------------------------------------------- Signals
+with st.sidebar:
+    st.subheader("Thresholds")
+    max_weight = st.slider("Flag a position above", 0.05, 0.40, 0.15, 0.01, format="%.0f%%",
+                           help="Positions larger than this are flagged for review.")
+    max_risk = st.slider("Flag a risk share above", 0.10, 0.60, 0.30, 0.01, format="%.0f%%",
+                         help="A holding contributing more than this share of portfolio volatility.")
+thresholds = Thresholds(max_weight=max_weight, max_risk_share=max_risk)
+
+intel = intel_engine.build(session, snapshot, thresholds=thresholds)
+
 with tabs[4]:
+    st.caption("Scores rank your holdings against each other from data you already hold. "
+               "They are a way to decide what to look at first, not advice, and they have "
+               "not been tested against what actually happened next.")
+    for n in intel.notes:
+        st.info(n)
+
+    if not intel.scores:
+        st.stop() if False else None
+    else:
+        score_rows = []
+        for isin, sc in intel.scores.items():
+            rec = intel.recommendation_for(isin)
+            ch = intel.changes.get(isin)
+            score_rows.append({
+                "Name": sc.name, "Overall": sc.overall,
+                "Change": (ch.delta if ch else None),
+                **{PILLAR_DEFINITIONS[k][0]: p.score for k, p in sc.pillars.items()},
+                "Signal": rec.label if rec else "—",
+                "Confidence": rec.confidence if rec else "—",
+            })
+        df = pd.DataFrame(score_rows).sort_values("Overall", ascending=False, na_position="last")
+        st.dataframe(df, width="stretch", hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="%.0f")
+                                    for c in ["Overall", "Change", "Momentum", "Risk",
+                                              "Valuation", "Growth", "Quality"]})
+        missing = [PILLAR_DEFINITIONS[k][0] for k, p in next(iter(intel.scores.values())).pillars.items()
+                   if not p.available]
+        if missing:
+            st.caption("Empty columns are pillars that need company fundamentals: "
+                       + ", ".join(missing) + ".")
+
+        st.subheader("Worth a look")
+        actionable = intel.actionable
+        if not actionable:
+            st.success("Nothing crossed the thresholds you set.")
+        for rec in actionable:
+            with st.container(border=True):
+                a, b = st.columns([4, 1])
+                a.markdown(f"**{rec.name}** — {rec.label}")
+                b.markdown(f"confidence: {rec.confidence}")
+                for reason in rec.reasons:
+                    st.markdown(f"- {reason}")
+                if rec.invalidators:
+                    st.caption("Stops applying when: " + "; ".join(rec.invalidators))
+                if rec.risks:
+                    st.caption("Bear in mind: " + " ".join(rec.risks))
+                st.caption(f"Based on data to {rec.as_of}.")
+
+        with st.expander("Everything else"):
+            for rec in [r for r in intel.recommendations if not r.is_actionable]:
+                st.markdown(f"**{rec.name}** — {rec.label}: {rec.reasons[0] if rec.reasons else ''}")
+
+        for label, why in unavailable_labels().items():
+            st.caption(f"**{label}** is not produced: {why}")
+
+    st.subheader("Alerts")
+    events = alert_engine.recent_events(session)
+    c1, c2 = st.columns([3, 1])
+    c1.caption(f"{len(events)} unread. Thresholds live in the database and can be edited below.")
+    if events and c2.button("Mark all read", width="stretch"):
+        alert_engine.acknowledge_all(session)
+        st.rerun()
+    if not events:
+        st.success("No unread alerts.")
+    for e in events:
+        st.markdown(f"- `{e.as_of}` **{e.category}** — {e.message}")
+
+    with st.expander("Alert rules"):
+        rules = alert_engine.load_rules(session)
+        rule_df = pd.DataFrame([{"Enabled": r.enabled, "Rule": r.label, "Category": r.category,
+                                 "Scope": r.scope, "Metric": r.metric, "Operator": r.operator,
+                                 "Threshold": float(r.threshold), "Cooldown (days)": r.cooldown_days}
+                                for r in rules])
+        edited = st.data_editor(rule_df, width="stretch", hide_index=True, key="rules_editor",
+                                disabled=["Rule", "Category", "Scope", "Metric"])
+        if st.button("Save rules"):
+            for r, (_, row) in zip(rules, edited.iterrows()):
+                r.enabled = bool(row["Enabled"])
+                r.operator = str(row["Operator"])
+                r.threshold = row["Threshold"]
+                r.cooldown_days = int(row["Cooldown (days)"])
+            session.commit()
+            st.success("Saved.")
+            st.rerun()
+
+# ---------------------------------------------------------------- Scenarios
+with tabs[5]:
+    an_ok = an is not None and not an.holding_returns.empty
+    if not an_ok:
+        st.info("Scenarios need price history for at least one holding. Refresh market data first.")
+    else:
+        weights = pd.Series({h.isin: h.weight for h in snapshot.holdings if h.weight}, dtype=float)
+        names_by_isin = {h.isin: (h.name or h.isin) for h in snapshot.holdings}
+        base_returns = sim.portfolio_returns(an.holding_returns, weights)
+        start_value = snapshot.total_value or float(snapshot.cash)
+
+        st.subheader("A range of possible futures")
+        st.caption("This resamples your own history in blocks to keep streaks intact. It is not a "
+                   "forecast: it shows what a range of outcomes would look like **if** the "
+                   "assumptions below held.")
+        c = st.columns(4)
+        years = c[0].slider("Years", 1, 20, 5)
+        drift_label = c[1].selectbox("Expected return", ["Assume none", "Set my own", "Use my history"],
+                                     help="Historical averages over a few years are a poor guide to "
+                                          "the future. Starting from zero shows the risk alone.")
+        annual = c[2].slider("Annual return", -0.05, 0.15, 0.05, 0.01, format="%.0f%%",
+                             disabled=drift_label != "Set my own")
+        monthly = c[3].number_input("Monthly contribution €", 0, 5000, 0, 50)
+        drift = {"Assume none": "zero", "Set my own": "fixed", "Use my history": "historical"}[drift_label]
+
+        result = sim.simulate_portfolio(base_returns, start_value, horizon_years=years, paths=2000,
+                                        drift=drift, annual_drift=annual, monthly_contribution=monthly)
+        if result is None:
+            st.warning("Not enough price history to simulate. At least 60 trading days are needed.")
+        else:
+            invested_line = pd.Series(
+                start_value + monthly * (result.percentile_paths.index * 12),
+                index=result.percentile_paths.index)
+            st.plotly_chart(charts.fan_chart(result.percentile_paths, start_value, theme,
+                                             invested=invested_line),
+                            width="stretch", key="fan")
+            m = st.columns(4)
+            m[0].metric("Median outcome", eur(result.median, 0))
+            m[1].metric("Pessimistic (5th percentile)", eur(result.percentile(5), 0))
+            m[2].metric("Optimistic (95th percentile)", eur(result.percentile(95), 0))
+            m[3].metric("Chance of ending below money in", pct(result.probability_of_loss, 0, sign=False))
+            st.caption("Assumptions: " + result.assumptions.describe() + ".")
+            for n in result.notes:
+                st.warning(n)
+            left, right = st.columns([2, 3])
+            with left:
+                st.dataframe(result.summary(), width="stretch", hide_index=True,
+                             column_config={"Value": st.column_config.NumberColumn(format="€ %.0f"),
+                                            "Total return": st.column_config.NumberColumn(format="percent")})
+            with right:
+                st.plotly_chart(charts.outcome_distribution(result.terminal, result.invested, theme),
+                                width="stretch", key="dist")
+
+        st.divider()
+        st.subheader("What if the market fell")
+        betas = pd.Series({h.isin: None for h in snapshot.holdings}, dtype=float)
+        if not intel.metrics.empty and "beta" in intel.metrics.columns:
+            betas = intel.metrics["beta"]
+        shock_rows = []
+        for size in (-0.10, -0.20, -0.30, -0.40):
+            s_res = sim.uniform_shock(weights, betas, size)
+            shock_rows.append({"Scenario": s_res.label, "Portfolio": s_res.portfolio_change,
+                               "Value after": (start_value * (1 + s_res.portfolio_change))})
+        sector_series = pd.Series({h.isin: (ETF_BUCKET if h.asset_type == "etf" else (h.sector or "Unknown"))
+                                   for h in snapshot.holdings})
+        for group in [g for g in sector_series.unique() if g != "Unknown"][:4]:
+            s_res = sim.group_shock(weights, sector_series, group, -0.40)
+            shock_rows.append({"Scenario": s_res.label, "Portfolio": s_res.portfolio_change,
+                               "Value after": (start_value * (1 + s_res.portfolio_change))})
+        st.dataframe(pd.DataFrame(shock_rows), width="stretch", hide_index=True,
+                     column_config={"Portfolio": st.column_config.NumberColumn(format="percent"),
+                                    "Value after": st.column_config.NumberColumn(format="€ %.0f")})
+        st.caption("Market falls are passed through each holding's beta and ignore company-specific "
+                   "news, so a real crash would not look exactly like this.")
+
+        worst = sim.worst_observed(base_returns)
+        if not worst.empty:
+            st.markdown("**The worst stretches this portfolio has actually lived through**")
+            st.dataframe(worst, width="stretch", hide_index=True,
+                         column_config={"Worst": st.column_config.NumberColumn(format="percent")})
+            st.caption("Limited by a short history: the worst thing that has happened is rarely the "
+                       "worst thing that can.")
+
+        st.divider()
+        st.subheader("What if the mix were different")
+        cov = an.holding_returns.dropna(how="all").cov() * 252
+        cov = cov.loc[[i for i in cov.index if i in weights.index],
+                      [c for c in cov.columns if c in weights.index]]
+        alternatives = {"As it is now": weights}
+        if len(cov) >= 2:
+            alternatives["Equal weights"] = sim.equal_weights(list(cov.index))
+            alternatives["Minimum variance"] = sim.minimum_variance_weights(cov)
+            alternatives["Equal risk"] = sim.risk_parity_weights(cov)
+        rows = []
+        for label, w in alternatives.items():
+            r = sim.portfolio_returns(an.holding_returns, w)
+            if r.empty:
+                continue
+            from bux_analyser.analytics.risk import annualised_volatility, max_drawdown, sharpe_ratio
+            lvl = (1 + r).cumprod()
+            dd = max_drawdown(lvl)
+            rows.append({"Allocation": label, "Return over the period": float(lvl.iloc[-1] - 1),
+                         "Volatility": annualised_volatility(r), "Sharpe": sharpe_ratio(r),
+                         "Worst fall": dd.max_drawdown if dd else None,
+                         "Largest position": float(w.max()) if len(w) else None})
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="percent")
+                                    for c in ["Return over the period", "Volatility", "Worst fall",
+                                              "Largest position"]})
+        st.caption("These are what the alternatives **would have done** over the history you hold, "
+                   "using today's list of holdings. A mix that looks better in the past has not been "
+                   "shown to do better next year, and this comparison ignores the tax and dealing "
+                   "costs of getting there. Minimum variance and equal risk are shown because "
+                   "neither needs a forecast of returns.")
+
+# ---------------------------------------------------------------- Holdings
+with tabs[6]:
     names = [h.name for h in snapshot.holdings]
     if not names:
         st.info("No open positions.")
@@ -364,7 +584,7 @@ with tabs[4]:
             st.plotly_chart(charts.price_comparison(picked, theme), width="stretch", key="compare")
 
 # ---------------------------------------------------------------- Transactions
-with tabs[5]:
+with tabs[7]:
     from bux_analyser.importers.persist import load_txns
     txns = load_txns(session)
     tx_df = pd.DataFrame([{

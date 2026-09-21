@@ -168,3 +168,70 @@ def price_comparison(series: dict[str, pd.Series], theme: Theme) -> go.Figure:
                                  line=dict(color=theme.color(i), width=2),
                                  hovertemplate=name + " %{y:,.1f}<extra></extra>"))
     return theme.apply(fig, height=400, hovermode="x unified")
+
+
+def fan_chart(percentile_paths: pd.DataFrame, start_value: float, theme: Theme,
+              invested: pd.Series | None = None) -> go.Figure:
+    """The range of simulated outcomes over time.
+
+    Bands, not a line: the middle path is one outcome among many and is not a forecast.
+    """
+    if percentile_paths is None or percentile_paths.empty:
+        return _empty(theme, "Run a simulation to see a range of outcomes.")
+    x = percentile_paths.index
+    fig = go.Figure()
+    bands = [("p5", "p95", 0.12, "5th to 95th percentile"),
+             ("p25", "p75", 0.25, "25th to 75th percentile")]
+    base = theme.color(0)
+    for lo, hi, alpha, label in bands:
+        fig.add_trace(go.Scatter(x=x, y=percentile_paths[hi], line=dict(width=0),
+                                 showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=x, y=percentile_paths[lo], line=dict(width=0), fill="tonexty",
+                                 fillcolor=_rgba(base, alpha), name=label,
+                                 hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=percentile_paths["p50"], name="Median outcome",
+                             line=dict(color=base, width=2),
+                             hovertemplate="Year %{x:.1f}: €%{y:,.0f}<extra></extra>"))
+    if invested is not None and len(invested):
+        fig.add_trace(go.Scatter(x=x, y=invested, name="Money put in",
+                                 line=dict(color=theme.muted, width=2, dash="dot"),
+                                 hovertemplate="Put in €%{y:,.0f}<extra></extra>"))
+    fig.update_xaxes(title="years from now", showgrid=False)
+    fig.update_yaxes(tickprefix="€", separatethousands=True)
+    return theme.apply(fig, height=400, hovermode="x unified")
+
+
+def outcome_distribution(terminal: np.ndarray, invested: float, theme: Theme) -> go.Figure:
+    """Where the simulated paths ended up, against the money put in."""
+    if terminal is None or not len(terminal):
+        return _empty(theme, "Run a simulation first.")
+    fig = go.Figure(go.Histogram(x=terminal, nbinsx=60,
+                                 marker=dict(color=_rgba(theme.color(0), 0.75)),
+                                 hovertemplate="€%{x:,.0f}: %{y} paths<extra></extra>"))
+    fig.add_vline(x=invested, line=dict(color=theme.muted, width=2, dash="dot"),
+                  annotation_text="money put in", annotation_position="top",
+                  annotation_font=dict(color=theme.muted, size=11))
+    fig.update_xaxes(tickprefix="€", separatethousands=True, showgrid=False)
+    fig.update_yaxes(title="paths")
+    return theme.apply(fig, height=300, legend=False)
+
+
+def score_bars(pillars: dict[str, float], theme: Theme, height: int = 220) -> go.Figure:
+    """Pillar scores for one holding, 0 to 100."""
+    if not pillars:
+        return _empty(theme, "No pillar could be scored.", height=height)
+    s = pd.Series(pillars)
+    fig = go.Figure(go.Bar(x=s.to_numpy(), y=list(s.index), orientation="h",
+                           marker=dict(color=theme.color(0), cornerradius=4),
+                           text=[f"{v:.0f}" for v in s], textposition="outside",
+                           textfont=dict(color=theme.muted, size=11),
+                           hovertemplate="%{y}: %{x:.0f} of 100<extra></extra>"))
+    fig.update_xaxes(range=[0, 108], showticklabels=False, showgrid=False)
+    fig.update_yaxes(showgrid=False)
+    return theme.apply(fig, height=height, legend=False)
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"

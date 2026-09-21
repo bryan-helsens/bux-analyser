@@ -244,7 +244,7 @@ def _clean(s: pd.Series) -> pd.Series:
 
 
 def _align(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
-    df = pd.concat([_clean(a).rename("a"), _clean(b).rename("b")], axis=1).dropna()
+    df = pd.concat([_clean(a).rename("a"), _clean(b).rename("b")], axis=1, sort=True).dropna()
     return df["a"], df["b"]
 
 

@@ -87,3 +87,27 @@ def test_returns_heatmap_centres_on_zero():
     fig = charts.returns_heatmap(pd.DataFrame({"Jan": [0.05], "Feb": [-0.01]}, index=[2024]))
     assert fig.data[0].zmid == 0
     assert fig.data[0].zmin == pytest.approx(-0.05) and fig.data[0].zmax == pytest.approx(0.05)
+
+
+def test_simulation_charts_build_and_degrade(theme):
+    paths = pd.DataFrame({"p5": [100, 90], "p25": [100, 95], "p50": [100, 105],
+                          "p75": [100, 115], "p95": [100, 130]}, index=[0.0, 1.0])
+    terminal = np.random.default_rng(0).normal(11000, 1500, 500)
+    built = [charts.fan_chart(paths, 100.0, theme),
+             charts.outcome_distribution(terminal, 10000, theme),
+             charts.score_bars({"Momentum": 72.0, "Risk": 41.0}, theme)]
+    assert all(isinstance(f, go.Figure) for f in built)
+    empty = [charts.fan_chart(pd.DataFrame(), 0, theme),
+             charts.outcome_distribution(np.array([]), 0, theme),
+             charts.score_bars({}, theme)]
+    for f in empty:
+        assert len(f.layout.annotations) == 1 and not f.data
+
+
+def test_fan_chart_draws_bands_and_a_median(theme):
+    paths = pd.DataFrame({"p5": [100, 90], "p25": [100, 95], "p50": [100, 105],
+                          "p75": [100, 115], "p95": [100, 130]}, index=[0.0, 1.0])
+    fig = charts.fan_chart(paths, 100.0, theme, invested=pd.Series([100.0, 100.0], index=[0.0, 1.0]))
+    names = [t.name for t in fig.data if t.name]
+    assert "Median outcome" in names and "Money put in" in names
+    assert any("95th percentile" in n for n in names)

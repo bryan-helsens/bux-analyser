@@ -1,0 +1,11 @@
+Transaction Time (CET),Transaction Category,Transaction Type,Transfer Type,Transaction Amount,Transaction Currency,Cash Balance Amount,Asset Id,Asset Name,Asset Quantity,Asset Price,Asset Currency,Currency Pair,Exchange Rate,Profit And Loss Amount,Profit And Loss Currency,Dividend Currency,Dividend Gross Amount,Dividend Net Amount,Dividend Tax Amount,Transaction Description
+2024-01-02 09:00:00.000000,deposits,Sepa Deposit,CASH_CREDIT,10000.0,EUR,10000.0,,,,,,,,,,,,,,
+2024-01-03 10:00:00.000000,trades,Buy Trade,ASSET_TRADE_BUY,2200.0,USD,,US0000000001,Acme Inc,20.0,110.0,USD,,,,,,,,,Order Partial Id: aaaaaaaa-0000-0000-0000-000000000001 - 1
+2024-01-03 10:00:00.000000,trades,Buy Trade,CASH_DEBIT,-2000.0,EUR,8000.0,US0000000001,Acme Inc,20.0,110.0,USD,EURUSD,1.1,,,,,,,Order Partial Id: aaaaaaaa-0000-0000-0000-000000000001 - 1
+2024-01-04 10:00:00.000000,trades,Buy Trade,ASSET_TRADE_BUY,1500.0,EUR,,NL0000000002,Dutch NV,100.0,15.0,EUR,,,,,,,,,Order Partial Id: bbbbbbbb-0000-0000-0000-000000000002 - 1
+2024-01-04 10:00:00.001000,trades,Buy Trade,CASH_DEBIT,-1500.0,EUR,6500.0,NL0000000002,Dutch NV,100.0,15.0,EUR,,,,,,,,,Order Partial Id: bbbbbbbb-0000-0000-0000-000000000002 - 1
+2024-01-05 10:00:00.000000,trades,Buy Trade,ASSET_TRADE_BUY,1000.0,EUR,,IE0000000003,Global ETF,10.0,100.0,EUR,,,,,,,,,Order Partial Id: cccccccc-0000-0000-0000-000000000003 - 1
+2024-01-05 10:00:00.001000,trades,Buy Trade,CASH_DEBIT,-1000.0,EUR,5500.0,IE0000000003,Global ETF,10.0,100.0,EUR,,,,,,,,,Order Partial Id: cccccccc-0000-0000-0000-000000000003 - 1
+2024-01-08 10:00:00.000000,trades,Buy Trade,ASSET_TRADE_BUY,880.0,USD,,US0000000004,Beta Corp,8.0,110.0,USD,,,,,,,,,Order Partial Id: dddddddd-0000-0000-0000-000000000004 - 1
+2024-01-08 10:00:00.001000,trades,Buy Trade,CASH_DEBIT,-800.0,EUR,4700.0,US0000000004,Beta Corp,8.0,110.0,USD,EURUSD,1.1,,,,,,,Order Partial Id: dddddddd-0000-0000-0000-000000000004 - 1
+2024-02-01 12:00:00.000000,dividends,Cash Dividend,CASH_CREDIT,17.0,EUR,4717.0,US0000000001,Acme Inc,,,USD,EURUSD,1.0,,,USD,20.0,17.0,3.0,

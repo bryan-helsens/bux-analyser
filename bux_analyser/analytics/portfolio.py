@@ -52,6 +52,7 @@ class BenchmarkComparison:
 @dataclass
 class Analytics:
     holding_returns: pd.DataFrame = field(default_factory=pd.DataFrame)
+    eur_prices: pd.DataFrame = field(default_factory=pd.DataFrame)
     portfolio_returns: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     risk: RiskStats | None = None
     benchmarks: list[BenchmarkComparison] = field(default_factory=list)
@@ -155,6 +156,7 @@ def build(holdings, prices, fx, currency_of, meta, twr_index, history_index,
 
     if history_index is not None and len(history_index):
         eur = eur_price_frame(prices, fx, currency_of, history_index, base)
+        a.eur_prices = eur
         held = [c for c in eur.columns if c in weights.index]
         if held:
             a.holding_returns = eur[held].pct_change().replace([np.inf, -np.inf], np.nan)

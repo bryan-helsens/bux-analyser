@@ -127,6 +127,49 @@ class QuoteCache(Base):
     note: Mapped[str] = mapped_column(String, default="")
 
 
+class AlertRule(Base):
+    """A threshold the user chose. Rules are data, not code, so they can be edited
+    in the dashboard without touching the engine."""
+    __tablename__ = "alert_rule"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String)
+    scope: Mapped[str] = mapped_column(String)              # security | portfolio
+    metric: Mapped[str] = mapped_column(String)
+    operator: Mapped[str] = mapped_column(String)           # gt | lt | gte | lte
+    threshold: Mapped[Decimal] = mapped_column(Money)
+    isin: Mapped[str | None] = mapped_column(String)        # None = every holding
+    group: Mapped[str | None] = mapped_column(String)       # e.g. a sector name
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    cooldown_days: Mapped[int] = mapped_column(Integer, default=7)
+    category: Mapped[str] = mapped_column(String, default="price")
+
+
+class AlertEvent(Base):
+    __tablename__ = "alert_event"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey("alert_rule.id"))
+    fired_at: Mapped[datetime] = mapped_column(DateTime)
+    as_of: Mapped[date] = mapped_column(Date)
+    isin: Mapped[str | None] = mapped_column(String)
+    subject: Mapped[str] = mapped_column(String)
+    value: Mapped[Decimal] = mapped_column(Money)
+    message: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String, default="price")
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ScoreSnapshot(Base):
+    """Stored so a score change can be explained by subtraction rather than guessed."""
+    __tablename__ = "score_snapshot"
+    __table_args__ = (UniqueConstraint("isin", "as_of"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    isin: Mapped[str] = mapped_column(String, index=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    overall: Mapped[Decimal | None] = mapped_column(Money)
+    pillars: Mapped[str] = mapped_column(Text)              # JSON: pillar key -> score
+    model_version: Mapped[str] = mapped_column(String, default="1")
+
+
 def make_engine(path=None):
     p = str(path or DB_PATH)
     eng = create_engine(f"sqlite:///{p}", future=True)

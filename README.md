@@ -16,6 +16,9 @@ running balance.
 **Phase 2 — market intelligence (done, pending live verification).** Benchmarks,
 exposure breakdowns, risk analytics and a tabbed dashboard.
 
+**Phase 3 — portfolio intelligence (done, pending live verification).** Scores,
+recommendations, alerts, Monte Carlo, stress tests and allocation what-ifs.
+
 ### What it does
 
 - **Import** — BUX transaction-history CSV: paired trade legs, fees, transaction taxes,
@@ -37,8 +40,32 @@ exposure breakdowns, risk analytics and a tabbed dashboard.
 - **Degradation** — a missing price or a dead provider produces a stated gap, never a
   fabricated number.
 
-Not built yet: ETF look-through, stock scoring, recommendations, alerts, Monte Carlo,
-scenarios, backtesting and the local AI assistant.
+- **Scores** — holdings ranked against each other on momentum and risk, each pillar
+  built from named metrics, with the change since the last snapshot explained by
+  subtraction rather than guessed. Valuation, growth and quality report as unavailable
+  because they need fundamentals.
+- **Recommendations** — deterministic rules over position size, risk share, score
+  movement and drawdown. Every card names the rule that fired, what would stop it
+  applying, and the fact that valuation is not assessed. No language model is involved.
+- **Alerts** — editable threshold rules stored in the database, evaluated daily against
+  price, portfolio and technical metrics, with per-rule cooldowns and a read/unread inbox.
+- **Scenarios** — Monte Carlo by moving-block bootstrap, so streaks survive the
+  resampling; the expected return is a stated choice rather than a silent extrapolation
+  from history. Market and sector shocks passed through beta, the worst stretches the
+  portfolio actually lived through, and equal-weight, minimum-variance and equal-risk
+  alternatives compared on the history you hold.
+
+Not built yet: company fundamentals, ETF look-through, factor regression, backtesting,
+news and the local AI assistant.
+
+### What it deliberately will not do
+
+- Predict a price. Simulations show a range conditional on stated assumptions and say so.
+- Present mean-variance "optimal" weights built on estimated returns. Minimum variance
+  and equal risk are offered instead because neither needs a return forecast.
+- Let a language model choose a score or a label.
+- Claim a backtest it has not run: the recommendation rules are untested against outcomes,
+  and the dashboard says that where they appear.
 
 ### Run locally
 
@@ -76,7 +103,9 @@ bux_analyser/
   importers/   BUX CSV parsing and idempotent persistence
   core/        transaction model, ledger, valuation, TWR, XIRR
   marketdata/  provider abstraction, Yahoo prices, ECB rates, cache-first store
-  analytics/   returns, risk, portfolio assembly
+  analytics/   returns, risk, indicators, portfolio assembly, scoring, simulation
+  alerts.py    rule evaluation and the event inbox
+  intelligence.py  scores, recommendations and alerts for a snapshot
   ui/          chart palette and builders
   service.py   snapshot assembly   cli.py   reconcile.py
 app.py         Streamlit dashboard
